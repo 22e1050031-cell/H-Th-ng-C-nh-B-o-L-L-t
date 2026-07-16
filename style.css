@@ -1,0 +1,425 @@
+/* ===========================
+   Toàn bộ trang
+=========================== */
+
+body{
+
+    margin:0;
+
+    padding:0;
+
+    background:#9BD8F0;
+
+    font-family:Arial, Helvetica, sans-serif;
+
+}
+
+/* ===========================
+   Khung chính
+=========================== */
+
+.container{
+
+    width:800px;
+
+    margin:50px auto;
+
+    background:white;
+
+    border-radius:20px;
+
+    padding:30px;
+
+    box-shadow:0 8px 20px rgba(0,0,0,0.15);
+
+}
+
+/* ===========================
+   Header
+=========================== */
+
+.header{
+
+    display:flex;
+
+    align-items:center;
+
+}
+
+/* Logo */
+
+.logo{
+
+    width:120px;
+
+}
+
+.logo img{
+
+    width:90px;
+
+    height:90px;
+
+}
+
+/* Thông tin trường */
+
+.school-info{
+
+    flex:1;
+
+    text-align:center;
+
+}
+
+.school-info h2{
+
+    margin:0;
+
+    font-size:42px;
+
+    color:#0A4F6A;
+
+}
+
+.school-info p{
+
+    margin-top:8px;
+
+    font-size:22px;
+
+    color:#555;
+
+}
+
+/* Ô trống bên phải */
+
+.empty{
+
+    width:120px;
+
+}
+
+/* ===========================
+   Đường kẻ
+=========================== */
+
+hr{
+
+    border:none;
+
+    height:2px;
+
+    background:#9BD8F0;
+
+    margin:30px 0;
+
+}
+
+/* ===========================
+   Tiêu đề
+=========================== */
+
+h1{
+
+    text-align:center;
+
+    color:#0A4F6A;
+
+    font-size:20px;
+
+    margin-bottom:50px;
+
+}
+
+/* ===========================
+   Nội dung
+=========================== */
+
+p{
+
+    text-align:center;
+
+    font-size:22px;
+
+    color:#444;
+
+}
+
+/* ===========================
+   Giá trị
+=========================== */
+
+h2{
+
+    text-align:center;
+
+    color:#0A4F6A;
+
+    font-size:48px;
+
+}
+/* ===========================
+        CARD
+=========================== */
+
+.cards{
+
+    display:flex;
+
+    gap:30px;
+
+    justify-content:center;
+
+}
+
+.card{
+
+    width:280px;
+
+    background:#F5FAFC;
+
+    border-radius:18px;
+
+    padding:25px;
+
+    box-shadow:0 5px 15px rgba(0,0,0,0.1);
+
+    text-align:center;
+
+}
+
+.card h3{
+
+    margin-top:0;
+
+    color:#0A4F6A;
+
+}
+
+.value{
+
+    margin-top:30px;
+
+    font-size:48px;
+
+    font-weight:bold;
+
+    color:#0A4F6A;
+
+}
+
+.status{
+
+    margin-top:30px;
+
+    font-size:38px;
+
+    font-weight:bold;
+
+}
+
+.status.normal{
+
+    color:#00A651;
+
+}
+
+.status.warning{
+
+    color:#F5A623;
+
+}
+
+.status.danger{
+
+    color:#D9534F;
+
+}
+
+.status.unknown{
+
+    color:#8A8A8A;
+
+}
+
+.status-card.normal{
+
+    border:2px solid #00A651;
+
+}
+
+.status-card.warning{
+
+    border:2px solid #F5A623;
+
+}
+
+.status-card.danger{
+
+    border:2px solid #D9534F;
+
+}
+
+.status-card.unknown{
+
+    border:2px solid #8A8A8A;
+
+}
+/* ===========================
+    Ngưỡng cảnh báo
+=========================== */
+
+.warning-card{
+
+    margin-top:35px;
+
+    background:#F5FAFC;
+
+    border-radius:18px;
+
+    padding:25px;
+
+    box-shadow:0 5px 15px rgba(0,0,0,0.1);
+
+    text-align:center;
+
+}
+
+.warning-card h3{
+
+    margin-top:0;
+
+    color:#0A4F6A;
+
+}
+
+.warning-value{
+
+    margin-top:20px;
+
+    font-size:40px;
+
+    font-weight:bold;
+
+    color:#E67E22;
+
+}
+
+/* Thanh kéo */
+
+#warningSlider{
+
+    width:90%;
+
+    margin-top:25px;
+
+}
+/* ===========================
+    Tình trạng hệ thống
+=========================== */
+
+#statusCard{
+
+    transition:0.3s;
+
+}
+
+#statusDescription{
+
+    font-size:16px;
+
+    margin-top:15px;
+
+    color:#555;
+
+}
+
+/* ===========================
+   Biểu đồ
+=========================== */
+
+.chart-card{
+
+    margin:35px auto 0;
+
+    width:min(90%, 800px);
+
+    background:#F5FAFC;
+
+    border-radius:18px;
+
+    padding:25px;
+
+    box-shadow:0 5px 15px rgba(0,0,0,0.1);
+
+}
+
+.chart-card h3{
+
+    margin-top:0;
+
+    color:#0A4F6A;
+
+    text-align:center;
+
+}
+
+#waterChart{
+
+    width:100% !important;
+
+    max-width:100%;
+
+    height:320px !important;
+
+    display:block;
+
+}
+/* ==========================
+   Cập nhật lần cuối
+========================== */
+
+.time-container{
+
+    display: flex;
+
+    justify-content: center;
+
+    margin-top: 25px;
+
+}
+
+.time-card{
+
+    width: 300px;
+
+    background: #f5fbff;
+
+    border-radius: 20px;
+
+    box-shadow: 0 5px 15px rgba(0,0,0,0.15);
+
+    padding: 20px;
+
+    text-align: center;
+
+}
+
+.time-card h3{
+
+    color: #0b4f6c;
+
+    margin-bottom: 20px;
+
+}
+
+.time{
+
+    font-size: 24px;
+
+    font-weight: bold;
+
+    color: #0b4f6c;
+
+}

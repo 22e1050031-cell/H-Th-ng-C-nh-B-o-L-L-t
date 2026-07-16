@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Hệ thống giám sát và cảnh báo lũ</title>
+
+    <link rel="stylesheet" href="style.css">
+
+</head>
+
+<body>
+
+    <div class="container">
+
+        <!-- Header -->
+
+        <div class="header">
+
+            <div class="logo">
+                <img src="images/logo.png" alt="Logo">
+            </div>
+
+            <div class="school-info">
+
+                <h2>ĐẠI HỌC HUẾ</h2>
+
+                <p>KHOA KỸ THUẬT VÀ CÔNG NGHỆ</p>
+
+            </div>
+
+            <div class="empty"></div>
+
+        </div>
+
+        <hr>
+
+        <!-- Tiêu đề -->
+
+        <h1>🌊 HỆ THỐNG GIÁM SÁT VÀ CẢNH BÁO LŨ</h1>
+
+        <div class="cards">
+
+  <div class="card">
+
+    <h3>💧 Mực nước hiện tại</h3>
+
+    <div class="value" id="waterLevel">
+
+        Đang tải...
+
+    </div>
+
+</div>
+
+    <div class="card" id="statusCard">
+
+    <h3>📢 Tình trạng hệ thống</h3>
+
+    <div class="status" id="systemStatus">
+
+        🟢 Bình thường
+
+    </div>
+
+    <p id="statusDescription">
+
+        Mực nước dưới ngưỡng cảnh báo.
+
+    </p>
+
+</div>
+
+</div>
+<div class="time-container">
+
+    <div class="time-card">
+
+        <h3>🕒 Cập nhật lần cuối</h3>
+
+        <div class="time" id="lastUpdate">
+
+            Đang tải...
+
+        </div>
+
+    </div>
+
+</div>
+</div>
+<!-- Ngưỡng cảnh báo -->
+
+<div class="warning-card">
+
+    <h3>⚠️ Ngưỡng cảnh báo</h3>
+
+    <div class="warning-value" id="warningValue">
+
+    1.50 m
+
+</div>
+
+<input
+type="range"
+id="warningSlider"
+min="0.10"
+max="4.00"
+step="0.01"
+value="1.50">
+
+</div>
+
+<!-- Biểu đồ -->
+
+<div class="chart-card">
+
+    <h3>📈 Biểu đồ mực nước</h3>
+
+    <canvas id="waterChart"></canvas>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script type="module" src="script.js"></script>
+
+</body>
+</html>
