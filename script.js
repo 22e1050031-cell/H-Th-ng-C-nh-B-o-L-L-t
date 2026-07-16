@@ -180,17 +180,17 @@ function updateSystemStatus(waterLevelValue, warningLevelValue) {
     if (waterLevelValue <= dangerThreshold) {
         state = "danger";
         label = "🔴 Nguy hiểm";
-        description = "Mực nước <= ngưỡng + 0.20m. Cần hành động ngay.";
+        description = "Mực nước đang ở mức nguy hiểm. Cần hành động ngay.";
     }
     else if (waterLevelValue <= warningThreshold) {
         state = "warning";
         label = "🟠 Cảnh báo";
-        description = "Mực nước > ngưỡng + 0.20m và <= ngưỡng + 0.30m. Cần theo dõi.";
+        description = "Mực nước chạm mức cảnh báo. Cần theo dõi.";
     }
     else {
         state = "normal";
         label = "🟢 Bình thường";
-        description = "Mực nước > ngưỡng + 0.30m.";
+        description = "Mực nước đang ở mức an toàn. Không cần hành động.";
     }
 
     systemStatus.className = `status ${state}`;
