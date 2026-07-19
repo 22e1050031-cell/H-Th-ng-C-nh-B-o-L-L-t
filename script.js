@@ -174,8 +174,8 @@ function updateSystemStatus(waterLevelValue, warningLevelValue) {
 
     }
 
-    const dangerThreshold = warningLevelValue + 0.20;
-    const warningThreshold = warningLevelValue + 0.30;
+    const dangerThreshold = warningLevelValue + 0.10;
+    const warningThreshold = warningLevelValue + 0.20;
 
     if (waterLevelValue <= dangerThreshold) {
         state = "danger";
