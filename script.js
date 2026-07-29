@@ -76,7 +76,7 @@ let lastWaterLevel = null;
 let lastWarningLevel = null;
 
 // ESP32 ghi giá trị -1 (sentinel) khi cảm biến không đo được (mất Echo
-// hoặc vượt quá tầm đo tối đa ~4m). Web IoT dùng hàm này để nhận biết
+// hoặc vượt quá tầm đo tối đa ~3m). Web IoT dùng hàm này để nhận biết
 // và hiển thị "Ngoài tầm đo" thay vì một con số gây hiểu nhầm.
 function isOutOfRange(waterLevelValue) {
     return !Number.isFinite(waterLevelValue) || waterLevelValue < 0;
