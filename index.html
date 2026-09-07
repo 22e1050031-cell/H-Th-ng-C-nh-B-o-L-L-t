@@ -1,131 +1,478 @@
 <!DOCTYPE html>
 <html lang="vi">
-
 <head>
-
     <meta charset="UTF-8">
-
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
     <title>Hệ thống giám sát và cảnh báo lũ</title>
 
     <link rel="stylesheet" href="style.css">
-
 </head>
-
 <body>
 
-    <div class="container">
+<div class="dashboard" id="dashboardApp">
 
-        <!-- Header -->
+    <!-- ============================================================ -->
+    <!-- A. HEADER / THANH ĐẦU TRANG                                   -->
+    <!-- Gồm: thương hiệu (logo + tên trường/khoa), thanh điều hướng   -->
+    <!-- chính (Trang chủ / Trạm 1 / Trạm 2 / Trạm 3) và khu vực       -->
+    <!-- trạng thái hệ thống chung + thời gian cập nhật.               -->
+    <!-- ============================================================ -->
+    <header class="app-header" id="appHeader">
 
-        <div class="header">
-
-            <div class="logo">
-                <img src="images/Logo.png">
+        <!-- A.1 Thương hiệu / đơn vị -->
+        <div class="header-brand" id="headerBrand">
+            <div class="header-logo" id="headerLogo">
+                <img id="logoImage" src="images/Logo.png" alt="Logo Đại học Huế">
             </div>
-
-            <div class="school-info">
-
-                <h2>ĐẠI HỌC HUẾ</h2>
-
-                <p>KHOA KỸ THUẬT VÀ CÔNG NGHỆ</p>
-
+            <div class="header-org-info" id="headerOrgInfo">
+                <h2 id="orgName">ĐẠI HỌC HUẾ</h2>
+                <p id="orgUnit">KHOA KỸ THUẬT VÀ CÔNG NGHỆ</p>
             </div>
-
-            <div class="empty"></div>
-
         </div>
 
-        <hr>
+        <!-- ==================================================== -->
+        <!-- B. THANH ĐIỀU HƯỚNG CHÍNH: Trang chủ + các trạm đo    -->
+        <!-- #navStationList chứa các .nav-item (mỗi trạm 1 nút). -->
+        <!-- #navStationTemplate là khuôn mẫu để JS clone ra thêm -->
+        <!-- trạm mới mà không cần sửa cấu trúc HTML.             -->
+        <!-- ==================================================== -->
+        <nav class="main-nav" id="mainNav" aria-label="Điều hướng chính">
+            <div class="nav-list" id="navList" role="group" aria-label="Danh sách trang">
 
-        <!-- Tiêu đề -->
+                <button type="button"
+                        class="nav-item is-active"
+                        id="navItem-home"
+                        data-view-id="home"
+                        aria-pressed="true">
+                    <span class="nav-item-icon icon" aria-hidden="true">🏠</span>
+                    <span class="nav-item-name">Trang chủ</span>
+                </button>
 
-        <h1>🌊 HỆ THỐNG GIÁM SÁT VÀ CẢNH BÁO LŨ</h1>
+                <button type="button"
+                        class="nav-item nav-item--station"
+                        id="navItem-station-1"
+                        data-view-id="station-1"
+                        aria-pressed="false">
+                    <span class="nav-item-icon icon" aria-hidden="true">📍</span>
+                    <span class="nav-item-name" data-field="deviceName">Trạm 1</span>
+                </button>
 
-        <div class="cards">
+                <button type="button"
+                        class="nav-item nav-item--station"
+                        id="navItem-station-2"
+                        data-view-id="station-2"
+                        aria-pressed="false">
+                    <span class="nav-item-icon icon" aria-hidden="true">📍</span>
+                    <span class="nav-item-name" data-field="deviceName">Trạm 2</span>
+                </button>
 
-  <div class="card">
+                <button type="button"
+                        class="nav-item nav-item--station"
+                        id="navItem-station-3"
+                        data-view-id="station-3"
+                        aria-pressed="false">
+                    <span class="nav-item-icon icon" aria-hidden="true">📍</span>
+                    <span class="nav-item-name" data-field="deviceName">Trạm 3</span>
+                </button>
 
-    <h3>💧 Mực nước cách cảm biến</h3>
+            </div>
 
-    <div class="value" id="waterLevel">
+            <!-- Khuôn mẫu (ẩn) để JS tạo thêm .nav-item cho trạm mới sau này -->
+            <template id="navStationTemplate">
+                <button type="button" class="nav-item nav-item--station" data-view-id="" aria-pressed="false">
+                    <span class="nav-item-icon icon" aria-hidden="true">📍</span>
+                    <span class="nav-item-name" data-field="deviceName">Trạm</span>
+                </button>
+            </template>
+        </nav>
 
-        Đang tải...
-
-    </div>
-
-</div>
-
-    <div class="card" id="statusCard">
-
-    <h3>📢 Tình trạng hệ thống</h3>
-
-    <div class="status" id="systemStatus">
-
-        🟢 Bình thường
-
-    </div>
-
-    <p id="statusDescription">
-
-        Mực nước dưới ngưỡng cảnh báo.
-
-    </p>
-
-</div>
-
-</div>
-<div class="time-container">
-
-    <div class="time-card">
-
-        <h3>🕒 Cập nhật lần cuối</h3>
-
-        <div class="time" id="lastUpdate">
-
-            Đang tải...
-
+        <!-- A.2 Trạng thái hệ thống chung + thời gian cập nhật -->
+        <div class="header-status" id="headerStatus">
+            <div class="system-health" id="systemHealth">
+                <span class="status-dot is-online" id="systemHealthDot" aria-hidden="true"></span>
+                <span class="system-health-text" id="systemHealthText">Hệ thống hoạt động tốt</span>
+                <span class="icon icon-wifi" id="wifiIcon" aria-hidden="true">📶</span>
+            </div>
+            <div class="last-update" id="lastUpdateWrapper">
+                <span class="icon icon-clock" aria-hidden="true">🕒</span>
+                <span class="last-update-label">Cập nhật lần cuối:</span>
+                <span class="last-update-value" id="lastUpdate">--:--:-- --/--/----</span>
+            </div>
         </div>
 
-    </div>
+    </header>
 
-</div>
-</div>
-<!-- Ngưỡng cảnh báo -->
+    <hr class="header-divider" id="headerDivider">
 
-<div class="warning-card">
+    <main class="dashboard-main" id="dashboardMain">
 
-    <h3>⚠️ Ngưỡng cảnh báo</h3>
+        <!-- ============================================================ -->
+        <!-- TRANG CHỦ: TỔNG QUAN TOÀN HỆ THỐNG (ĐA TRẠM)                 -->
+        <!-- Đây là "trung tâm điều khiển": số liệu tổng hợp, ước tính    -->
+        <!-- tốc độ truyền lũ giữa các trạm, biểu đồ so sánh 3 trạm,      -->
+        <!-- bảng trạng thái tổng quan và danh sách cảnh báo gần đây.     -->
+        <!-- ============================================================ -->
+        <section class="view" id="view-home" data-view-id="home">
 
-    <div class="warning-value" id="warningValue">
+            <section class="page-title" id="pageTitleHome">
+                <h1><span class="icon icon-wave" aria-hidden="true">🌊</span> TỔNG QUAN HỆ THỐNG GIÁM SÁT VÀ CẢNH BÁO LŨ</h1>
+                <p class="page-subtitle">Hệ thống giám sát mực nước đa trạm thời gian thực</p>
+            </section>
 
-    0.50 m
+            <!-- Thẻ tổng quan toàn hệ thống -->
+            <div class="overview-cards" id="overviewCards">
+                <article class="overview-card overview-card--total" id="cardTotalStations">
+                    <span class="overview-card-icon icon" aria-hidden="true">📡</span>
+                    <div class="overview-card-body">
+                        <h3 class="overview-card-title">TỔNG SỐ TRẠM</h3>
+                        <p class="overview-card-value" id="totalStationsValue">3</p>
+                        <p class="overview-card-note">Trạm đang được giám sát</p>
+                    </div>
+                </article>
 
-</div>
+                <article class="overview-card overview-card--online" id="cardOnlineStations">
+                    <span class="overview-card-icon icon" aria-hidden="true">📶</span>
+                    <div class="overview-card-body">
+                        <h3 class="overview-card-title">TRẠM HOẠT ĐỘNG</h3>
+                        <p class="overview-card-value" id="onlineStationsValue">0</p>
+                        <p class="overview-card-note">Đang kết nối và gửi dữ liệu</p>
+                    </div>
+                </article>
 
-<input
-type="range"
-id="warningSlider"
-min="0.10"
-max="3.00"
-step="0.01"
-value="0.50">
+                <article class="overview-card overview-card--offline" id="cardOfflineStations">
+                    <span class="overview-card-icon icon" aria-hidden="true">📵</span>
+                    <div class="overview-card-body">
+                        <h3 class="overview-card-title">TRẠM MẤT KẾT NỐI</h3>
+                        <p class="overview-card-value" id="offlineStationsValue">0</p>
+                        <p class="overview-card-note">Không có dữ liệu mới</p>
+                    </div>
+                </article>
 
-</div>
+                <article class="overview-card overview-card--alert" id="cardAlertStations">
+                    <span class="overview-card-icon icon" aria-hidden="true">⚠️</span>
+                    <div class="overview-card-body">
+                        <h3 class="overview-card-title">TRẠM ĐANG CẢNH BÁO</h3>
+                        <p class="overview-card-value" id="alertStationsValue">0</p>
+                        <p class="overview-card-note">Mực nước vượt ngưỡng</p>
+                    </div>
+                </article>
+            </div>
 
-<!-- Biểu đồ -->
+            <div class="home-panels-row" id="homePanelsRow">
 
-<div class="chart-card">
+                <!-- ==================================================== -->
+                <!-- ƯỚC TÍNH TỐC ĐỘ TRUYỀN LŨ GIỮA CÁC TRẠM               -->
+                <!-- ==================================================== -->
+                <section class="flow-speed-panel" id="flowSpeedPanel">
+                    <h3 class="panel-title">
+                        <span class="icon" aria-hidden="true">🌊</span>
+                        ƯỚC TÍNH TỐC ĐỘ TRUYỀN LŨ GIỮA CÁC TRẠM
+                    </h3>
 
-    <h3>📈 Biểu đồ mực nước</h3>
+                    <div class="flow-speed-controls" id="flowSpeedControls">
+                        <div class="flow-speed-control-item">
+                            <label for="riseThresholdInput">Mức nước dâng để phân tích:</label>
+                            <div class="flow-speed-input-group">
+                                <input type="number" id="riseThresholdInput" class="metric-input"
+                                       value="1.00" step="0.05" min="0" inputmode="decimal"
+                                       aria-label="Mức nước dâng để phân tích">
+                                <span class="metric-unit">m</span>
+                            </div>
+                        </div>
 
-    <canvas id="waterChart"></canvas>
+                        <div class="flow-speed-control-item">
+                            <span class="flow-speed-control-label">Khoảng cách giữa các trạm (km):</span>
+                            <button type="button" id="editDistancesBtn" class="btn btn-set btn-outline">
+                                <span class="icon" aria-hidden="true">✏️</span> Chỉnh sửa khoảng cách
+                            </button>
+                        </div>
+                    </div>
 
-</div>
+                    <!-- Form chỉnh khoảng cách (ẩn mặc định, mở khi bấm nút trên) -->
+                    <div class="distance-editor" id="distanceEditor" hidden>
+                        <div class="distance-editor-row">
+                            <label for="distanceInput-1-2">Trạm 1 → Trạm 2 (km):</label>
+                            <input type="number" id="distanceInput-1-2" class="metric-input" step="0.1" min="0.1" value="5.0">
+                        </div>
+                        <div class="distance-editor-row">
+                            <label for="distanceInput-2-3">Trạm 2 → Trạm 3 (km):</label>
+                            <input type="number" id="distanceInput-2-3" class="metric-input" step="0.1" min="0.1" value="7.0">
+                        </div>
+                        <button type="button" id="saveDistancesBtn" class="btn btn-set">
+                            <span class="icon" aria-hidden="true">💾</span> Lưu khoảng cách
+                        </button>
+                    </div>
+
+                    <div class="flow-pair-tabs" id="flowPairTabs" role="group" aria-label="Chọn cặp trạm phân tích">
+                        <button type="button" class="flow-pair-tab is-active" data-pair="1-2" aria-pressed="true">Trạm 1 → Trạm 2</button>
+                        <button type="button" class="flow-pair-tab" data-pair="2-3" aria-pressed="false">Trạm 2 → Trạm 3</button>
+                        <button type="button" class="flow-pair-tab" data-pair="1-3" aria-pressed="false">Trạm 1 → Trạm 3</button>
+                    </div>
+
+                    <div class="flow-result" id="flowResult">
+                        <!-- JS render nội dung kết quả ước tính vào đây -->
+                    </div>
+                </section>
+
+                <!-- ==================================================== -->
+                <!-- BIỂU ĐỒ SO SÁNH XU HƯỚNG MỰC NƯỚC DÂNG 3 TRẠM         -->
+                <!-- ==================================================== -->
+                <section class="chart-panel" id="homeChartPanel">
+                    <h3 class="chart-panel-title">
+                        <span class="icon" aria-hidden="true">📈</span>
+                        Biểu đồ xu hướng mức nước dâng các trạm
+                    </h3>
+
+                    <div class="chart-range-tabs" id="homeChartRangeTabs" role="group" aria-label="Khoảng thời gian biểu đồ">
+                        <button type="button" class="range-tab is-active" data-range="6h" aria-pressed="true">6 giờ</button>
+                        <button type="button" class="range-tab" data-range="12h" aria-pressed="false">12 giờ</button>
+                        <button type="button" class="range-tab" data-range="24h" aria-pressed="false">24 giờ</button>
+                        <button type="button" class="range-tab" data-range="7d" aria-pressed="false">7 ngày</button>
+                    </div>
+
+                    <div class="chart-canvas-wrapper" id="homeChartCanvasWrapper">
+                        <canvas id="homeWaterChart" role="img" aria-label="Biểu đồ mức nước dâng các trạm theo thời gian"></canvas>
+                        <p class="chart-empty-note" id="homeChartEmptyNote" hidden>Chưa đủ dữ liệu lịch sử cho khoảng thời gian này.</p>
+                    </div>
+                </section>
+
+            </div><!-- /.home-panels-row -->
+
+            <!-- ==================================================== -->
+            <!-- BẢNG TRẠNG THÁI TỔNG QUAN CÁC TRẠM                    -->
+            <!-- ==================================================== -->
+            <section class="station-status-panel" id="stationStatusPanel">
+                <h3 class="panel-title">
+                    <span class="icon" aria-hidden="true">📋</span>
+                    TRẠNG THÁI CÁC TRẠM
+                </h3>
+
+                <div class="station-status-table-wrapper">
+                    <table class="station-status-table" id="stationStatusTable">
+                        <thead>
+                            <tr>
+                                <th>Trạm</th>
+                                <th>Mực nước hiện tại</th>
+                                <th>Mức dâng so với tham chiếu</th>
+                                <th>Trạng thái</th>
+                                <th>Kết nối</th>
+                                <th>Cập nhật cuối</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="stationStatusTableBody">
+                            <!-- JS render 1 hàng cho mỗi trạm vào đây -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- ==================================================== -->
+            <!-- DANH SÁCH CẢNH BÁO GẦN ĐÂY (TOÀN HỆ THỐNG)            -->
+            <!-- ==================================================== -->
+            <section class="recent-alerts-panel" id="recentAlertsPanel">
+                <h3 class="panel-title">
+                    <span class="icon" aria-hidden="true">🔔</span>
+                    CẢNH BÁO GẦN ĐÂY
+                </h3>
+
+                <ul class="recent-alerts-list" id="recentAlertsList">
+                    <!-- JS render các mục cảnh báo gần đây vào đây -->
+                    <li class="recent-alerts-empty" id="recentAlertsEmpty">Chưa có cảnh báo nào được ghi nhận.</li>
+                </ul>
+            </section>
+
+        </section><!-- /#view-home -->
+
+        <!-- ============================================================ -->
+        <!-- TRANG CHI TIẾT TỪNG TRẠM (station-1 / station-2 / station-3)  -->
+        <!-- Cả 3 trạm dùng chung 1 khuôn mẫu bố cục thông qua             -->
+        <!-- #stationViewTemplate; JS clone khuôn mẫu này ra 3 bản, mỗi    -->
+        <!-- bản gắn data-station-id riêng để tách biệt hoàn toàn dữ liệu. -->
+        <!-- ============================================================ -->
+        <template id="stationViewTemplate">
+            <section class="view view--station" data-view-id="">
+
+                <section class="page-title">
+                    <h1><span class="icon icon-wave" aria-hidden="true">🌊</span> GIÁM SÁT VÀ CẢNH BÁO LŨ - <span data-field="stationLabel">Trạm</span></h1>
+                </section>
+
+                <!-- C. THÔNG TIN TRẠM ĐANG XEM (tóm tắt) -->
+                <section class="station-meta">
+                    <div class="station-meta-item">
+                        <span class="station-meta-label">Trạm:</span>
+                        <span class="station-meta-value" data-field="deviceName">--</span>
+                    </div>
+                    <div class="station-meta-item">
+                        <span class="station-meta-label">Mã thiết bị:</span>
+                        <span class="station-meta-value" data-field="deviceId">--</span>
+                    </div>
+                    <div class="station-meta-item">
+                        <span class="station-meta-label">Trạng thái kết nối:</span>
+                        <span class="station-meta-value" data-field="connectionStatus">--</span>
+                    </div>
+                </section>
+
+                <div class="metric-cards">
+
+                    <!-- D. MỰC NƯỚC HIỆN TẠI -->
+                    <article class="metric-card metric-card--current-level">
+                        <h3 class="metric-card-title">
+                            <span class="icon" aria-hidden="true">💧</span>
+                            MỰC NƯỚC HIỆN TẠI (<span class="station-label" data-field="stationLabel">Trạm</span>)
+                        </h3>
+
+                        <div class="water-level">
+                            <span class="water-level-value" data-field="waterLevel">--</span>
+                            <span class="water-level-unit" data-field="waterLevelUnit">m</span>
+                        </div>
+
+                        <div class="metric-delta" data-field="waterLevelDelta">
+                            <span class="metric-delta-icon" data-field="waterLevelDeltaIcon" aria-hidden="true">→</span>
+                            <span class="metric-delta-text">So với mực nước tham chiếu: <span data-field="waterLevelDeltaValue">--</span></span>
+                        </div>
+                    </article>
+
+                    <!-- D. MỰC NƯỚC THAM CHIẾU (mốc để tính mức dâng) -->
+                    <article class="metric-card metric-card--initial-level">
+                        <h3 class="metric-card-title">
+                            <span class="icon" aria-hidden="true">🚩</span>
+                            MỰC NƯỚC THAM CHIẾU (<span class="station-label" data-field="stationLabel">Trạm</span>)
+                        </h3>
+
+                        <div class="metric-input-row">
+                            <input type="number"
+                                   class="metric-input"
+                                   data-field="initialLevelInput"
+                                   value="0.50"
+                                   step="0.01"
+                                   min="0"
+                                   inputmode="decimal"
+                                   aria-label="Mực nước tham chiếu">
+                            <span class="metric-unit">m</span>
+                            <button type="button" data-field="initialLevelSetBtn" class="btn btn-set">
+                                <span class="icon" aria-hidden="true">💾</span> SET
+                            </button>
+                        </div>
+
+                        <p class="metric-note">
+                            Mốc 0 m của biểu đồ mức dâng. Giá trị này được lưu riêng cho từng trạm.
+                        </p>
+                    </article>
+
+                    <!-- F. TÌNH TRẠNG HỆ THỐNG (của trạm này) -->
+                    <article class="metric-card metric-card--system-status status-card is-normal" data-field="cardSystemStatus">
+                        <h3 class="metric-card-title">
+                            <span class="icon" aria-hidden="true">📢</span>
+                            TÌNH TRẠNG HỆ THỐNG (<span class="station-label" data-field="stationLabel">Trạm</span>)
+                        </h3>
+
+                        <div class="alert-status" aria-live="polite">
+                            <span class="alert-label visually-hidden">Trạng thái</span>
+                            <span class="status-dot status-dot--lg is-normal" data-field="systemStatusDot" aria-hidden="true"></span>
+                            <span class="status-text is-normal" data-field="systemStatus">--</span>
+                        </div>
+
+                        <p class="status-description" data-field="statusDescription">--</p>
+                    </article>
+
+                    <!-- F. DỰ ĐOÁN XU HƯỚNG MỰC NƯỚC -->
+                    <article class="metric-card metric-card--prediction">
+                        <h3 class="metric-card-title">
+                            <span class="icon" aria-hidden="true">📈</span>
+                            DỰ ĐOÁN XU HƯỚNG MỰC NƯỚC
+                        </h3>
+
+                        <div class="prediction-select-row">
+                            <label class="prediction-select-label">Dự đoán trong:</label>
+                            <select class="prediction-select" data-field="predictionRange">
+                                <option value="30" selected>30 phút</option>
+                                <option value="60">60 phút</option>
+                                <option value="180">3 giờ</option>
+                            </select>
+                        </div>
+
+                        <div class="prediction-trend" data-field="predictionTrend">
+                            <span class="prediction-trend-icon" data-field="predictionTrendIcon" aria-hidden="true">→</span>
+                            <span class="prediction-trend-text" data-field="predictionTrendText">--</span>
+                        </div>
+
+                        <p class="prediction-detail">Mức thay đổi dự kiến: <span data-field="predictionDelta">--</span></p>
+                        <p class="prediction-detail">Thời gian dự đoán: <span data-field="predictionTime">--</span></p>
+                    </article>
+
+                </div><!-- /.metric-cards -->
+
+                <div class="lower-panels">
+
+                    <!-- E. BIỂU ĐỒ LỊCH SỬ MỨC NƯỚC DÂNG CỦA TRẠM NÀY -->
+                    <section class="chart-panel">
+                        <h3 class="chart-panel-title">
+                            <span class="icon" aria-hidden="true">📈</span>
+                            Biểu đồ mức nước dâng (<span class="station-label" data-field="stationLabel">Trạm</span>)
+                        </h3>
+
+                        <div class="chart-range-tabs" data-field="chartRangeTabs" role="group" aria-label="Khoảng thời gian biểu đồ">
+                            <button type="button" class="range-tab is-active" data-range="6h" aria-pressed="true">6 giờ</button>
+                            <button type="button" class="range-tab" data-range="12h" aria-pressed="false">12 giờ</button>
+                            <button type="button" class="range-tab" data-range="24h" aria-pressed="false">24 giờ</button>
+                            <button type="button" class="range-tab" data-range="7d" aria-pressed="false">7 ngày</button>
+                        </div>
+
+                        <div class="chart-canvas-wrapper" data-field="chartCanvasWrapper">
+                            <canvas data-field="waterChart" role="img" aria-label="Biểu đồ mức nước dâng theo thời gian"></canvas>
+                            <p class="chart-empty-note" data-field="chartEmptyNote" hidden>Chưa đủ dữ liệu lịch sử cho khoảng thời gian này.</p>
+                        </div>
+                    </section>
+
+                    <!-- F. CÀI ĐẶT NGƯỠNG CẢNH BÁO (3 mức) -->
+                    <section class="alert-settings-panel">
+                        <h3 class="alert-settings-title">
+                            <span class="icon" aria-hidden="true">🛡️</span>
+                            CÀI ĐẶT NGƯỠNG CẢNH BÁO (Theo mực nước dâng lên)
+                        </h3>
+
+                        <div class="alert-level-row" data-field="alertLevelRow1" data-level="1">
+                            <span class="alert-level-icon icon" aria-hidden="true">⚠️</span>
+                            <span class="alert-level-label">Cảnh báo mức 1</span>
+                            <input type="number" class="alert-level-input" data-field="alertLevel1Input"
+                                   value="0.50" step="0.01" min="0" aria-label="Ngưỡng cảnh báo mức 1">
+                            <span class="alert-level-unit">m</span>
+                            <button type="button" class="btn btn-set" data-field="alertLevel1SetBtn">SET</button>
+                        </div>
+
+                        <div class="alert-level-row" data-field="alertLevelRow2" data-level="2">
+                            <span class="alert-level-icon icon" aria-hidden="true">🚨</span>
+                            <span class="alert-level-label">Cảnh báo mức 2</span>
+                            <input type="number" class="alert-level-input" data-field="alertLevel2Input"
+                                   value="0.80" step="0.01" min="0" aria-label="Ngưỡng cảnh báo mức 2">
+                            <span class="alert-level-unit">m</span>
+                            <button type="button" class="btn btn-set" data-field="alertLevel2SetBtn">SET</button>
+                        </div>
+
+                        <div class="alert-level-row" data-field="alertLevelRow3" data-level="3">
+                            <span class="alert-level-icon icon" aria-hidden="true">🆘</span>
+                            <span class="alert-level-label">Cảnh báo mức 3</span>
+                            <input type="number" class="alert-level-input" data-field="alertLevel3Input"
+                                   value="1.00" step="0.01" min="0" aria-label="Ngưỡng cảnh báo mức 3">
+                            <span class="alert-level-unit">m</span>
+                            <button type="button" class="btn btn-set" data-field="alertLevel3SetBtn">SET</button>
+                        </div>
+                    </section>
+
+                </div><!-- /.lower-panels -->
+
+            </section>
+        </template>
+
+        <!-- Vùng chứa 3 trang trạm, JS clone stationViewTemplate vào đây -->
+        <div id="stationViewsContainer"></div>
+
+    </main>
+
+</div><!-- /#dashboardApp -->
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script type="module" src="script.js"></script>
-
 </body>
 </html>
