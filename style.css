@@ -637,6 +637,24 @@ select {
     flex: 1 1 220px;
 }
 
+.chart-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+}
+
+.chart-panel-header .chart-panel-title {
+    flex: 1 1 220px;
+}
+
+.btn-export-csv {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
 /* Không dùng flex nội bộ ở đây vì tiêu đề có văn bản xen giữa icon
    và <span class="station-label"> (xem ghi chú ở .metric-card-title). */
 .chart-panel-title .icon {
@@ -880,6 +898,55 @@ select {
 .overview-card--alert { border-left-color: var(--color-warning); }
 .overview-card--alert .overview-card-value { color: var(--color-warning); }
 
+/* ============================================================
+   TRANG CHỦ - SAO LƯU DỮ LIỆU DÀI HẠN (GOOGLE SHEETS)
+   ============================================================ */
+.backup-panel {
+    background: var(--color-bg-card);
+    border-radius: var(--radius-card);
+    box-shadow: var(--shadow-card);
+    padding: 24px;
+    margin-bottom: var(--space-5);
+}
+
+.backup-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.backup-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--color-text);
+}
+
+.backup-config-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.backup-url-input {
+    flex: 1 1 320px;
+    width: auto;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-text);
+}
+
+.backup-counter {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--color-text-muted);
+}
+
 /* Hàng 2 cột: khối ước tính tốc độ truyền lũ + biểu đồ so sánh */
 .home-panels-row {
     display: grid;
@@ -926,6 +993,14 @@ select {
     font-size: 13px;
     font-weight: 700;
     color: var(--color-heading);
+}
+
+.flow-speed-auto-note {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    line-height: 1.5;
 }
 
 .flow-speed-input-group {
