@@ -77,7 +77,13 @@ const connectedRef = ref(database, ".info/connected");
 // ------------------------------------------------------------
 // HẰNG SỐ
 // ------------------------------------------------------------
-const MAX_MEASUREMENTS = 5; // chỉ giữ 5 bản ghi Measurement mới nhất trên Firebase / trạm
+// Firebase RTDB giờ chỉ đóng vai trò BỘ ĐỆM GẦN ĐÂY (không cần giữ mãi
+// mãi) - dữ liệu ĐẦY ĐỦ, KHÔNG GIỚI HẠN được sao lưu song song sang Google
+// Sheets (xem "SAO LƯU DỮ LIỆU DÀI HẠN SANG GOOGLE SHEETS" bên dưới). Giữ
+// 200 bản ghi/trạm là đủ cho biểu đồ "24 giờ" ngay cả ở chu kỳ đo nhanh
+// nhất hiện tại (15s/lần khi test) mà vẫn cách xa giới hạn dung lượng của
+// gói Firebase free (1GB).
+const MAX_MEASUREMENTS = 200;
 const CLIENT_HISTORY_LIMIT = 500; // số điểm tối đa giữ trong bộ nhớ trình duyệt để vẽ biểu đồ/dự đoán/ước tính tốc độ truyền lũ
 
 // Trạm 1 dùng SENSOR_INTERVAL=15s (chế độ test) trong code ESP32 hiện tại.
@@ -91,7 +97,19 @@ const MIN_HARDWARE_THRESHOLD = 0.05; // ngưỡng khoảng cách tối thiểu h
 const DEFAULT_INITIAL_LEVEL = 0.5;
 const DEFAULT_ALERT_LEVELS = { level1: 0.5, level2: 0.8, level3: 1.0 };
 const DEFAULT_DISTANCES = { "1-2": 5.0, "2-3": 7.0 }; // km - chỉnh được trên giao diện, không hard-code cố định
-const DEFAULT_RISE_THRESHOLD = 1.0; // m - mức dâng mặc định để ước tính tốc độ truyền lũ
+
+// ------------------------------------------------------------
+// PHÁT HIỆN TỰ ĐỘNG "THỜI ĐIỂM BẮT ĐẦU DÂNG" (thay cho ngưỡng mức dâng
+// cố định do người dùng nhập trước đây - xem detectRiseStartEvent()).
+// ------------------------------------------------------------
+// Độ dốc tối thiểu (m/phút) để coi một chuỗi điểm đo là "đang dâng thật
+// sự", không phải nhiễu đo đạc của cảm biến siêu âm. Độ nhạy "trung
+// bình": đủ thấp để bắt được các đợt dâng vừa phải, đủ cao để không báo
+// nhầm do sai số cảm biến (thường dao động vài mm quanh giá trị thật).
+const RISE_START_MIN_SLOPE_PER_MIN = 0.02;
+// Số điểm đo liên tiếp (kể cả điểm bắt đầu) phải cùng cho thấy xu hướng
+// dâng thì mới chấp nhận đó là khởi đầu một đợt dâng thật.
+const RISE_START_MIN_CONSECUTIVE_POINTS = 3;
 
 const RANGE_MS = {
     "6h": 6 * 3600 * 1000,
@@ -173,7 +191,6 @@ const state = {
     currentViewId: "home",
     activeRange: "6h", // dùng chung cho biểu đồ trang chủ + từng trạm (đơn giản hoá, đồng bộ mốc thời gian)
     firebaseConnected: false,
-    riseThreshold: DEFAULT_RISE_THRESHOLD,
     activeFlowPair: "1-2",
     distances: { ...DEFAULT_DISTANCES },
     distancesInitialized: false,
@@ -356,6 +373,8 @@ function buildStationView(stationId) {
         alertLevel3SetBtn: root.querySelector('[data-field="alertLevel3SetBtn"]'),
     };
 
+    els.exportCsvBtn = root.querySelector('[data-field="exportCsvBtn"]');
+
     stationEls[stationId] = els;
     stationViewsContainer.appendChild(fragment);
 
@@ -465,6 +484,8 @@ function buildStationView(stationId) {
     els.alertLevel1SetBtn.addEventListener("click", () => handleSetAlertLevels(els.alertLevel1SetBtn));
     els.alertLevel2SetBtn.addEventListener("click", () => handleSetAlertLevels(els.alertLevel2SetBtn));
     els.alertLevel3SetBtn.addEventListener("click", () => handleSetAlertLevels(els.alertLevel3SetBtn));
+
+    els.exportCsvBtn.addEventListener("click", () => exportStationHistoryCsv(stationId));
 }
 
 function hexToRgba(hex, alpha) {
@@ -475,6 +496,293 @@ function hexToRgba(hex, alpha) {
     const b = parseInt(m[3], 16);
     return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
+
+// ------------------------------------------------------------
+// XUẤT DỮ LIỆU CSV (từ bộ nhớ trình duyệt - state.stations[*].history)
+// ------------------------------------------------------------
+// Ghi chú: đây là xuất "nhanh" dữ liệu ĐANG CÓ TRONG PHIÊN LÀM VIỆC HIỆN
+// TẠI (tối đa CLIENT_HISTORY_LIMIT điểm/trạm, nạp từ Firebase lúc mở
+// trang + các điểm mới nhận qua realtime). Đây KHÔNG phải kho lưu trữ
+// toàn bộ lịch sử - phần đó do khối "Sao lưu dữ liệu dài hạn (Google
+// Sheets)" đảm nhiệm (xem GOOGLE_SHEETS_BACKUP bên dưới).
+function csvEscape(value) {
+    const s = String(value ?? "");
+    if (/[",\n]/.test(s)) {
+        return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+}
+
+function downloadCsv(filename, rows) {
+    const csvContent = rows.map((row) => row.map(csvEscape).join(",")).join("\r\n");
+    // Thêm BOM để Excel trên Windows nhận đúng UTF-8 (tránh lỗi hiển thị
+    // tiếng Việt có dấu thành ký tự lạ khi mở trực tiếp bằng Excel).
+    const blob = new Blob(["﻿" + csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function formatCsvTimestamp(date) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function exportStationHistoryCsv(stationId) {
+    const s = state.stations[stationId];
+    const meta = STATION_META[stationId];
+    const rows = [["Trạm", "Thời gian đo", "Khoảng cách cảm biến (m)", "Mức nước dâng (m)"]];
+    s.history.forEach((p) => {
+        rows.push([meta.name, formatCsvTimestamp(p.t), p.distance, p.rise.toFixed(3)]);
+    });
+    if (rows.length === 1) {
+        console.warn(`[${stationId}] Chưa có dữ liệu lịch sử để xuất CSV.`);
+        return;
+    }
+    const stamp = formatCsvTimestamp(new Date()).replace(/[: ]/g, "-");
+    downloadCsv(`${stationId}_${stamp}.csv`, rows);
+}
+
+function exportAllStationsHistoryCsv() {
+    const rows = [["Trạm", "Thời gian đo", "Khoảng cách cảm biến (m)", "Mức nước dâng (m)"]];
+    STATION_IDS.forEach((stationId) => {
+        const s = state.stations[stationId];
+        const meta = STATION_META[stationId];
+        s.history.forEach((p) => {
+            rows.push([meta.name, formatCsvTimestamp(p.t), p.distance, p.rise.toFixed(3)]);
+        });
+    });
+    if (rows.length === 1) {
+        console.warn("Chưa có dữ liệu lịch sử để xuất CSV.");
+        return;
+    }
+    const stamp = formatCsvTimestamp(new Date()).replace(/[: ]/g, "-");
+    downloadCsv(`tat-ca-tram_${stamp}.csv`, rows);
+}
+
+document.getElementById("exportCsvAllBtn").addEventListener("click", exportAllStationsHistoryCsv);
+
+// ------------------------------------------------------------
+// SAO LƯU DỮ LIỆU DÀI HẠN SANG GOOGLE SHEETS
+// ------------------------------------------------------------
+// Kiến trúc đã chốt: Firebase Realtime Database chỉ đóng vai trò bộ đệm
+// GẦN ĐÂY (xem MAX_MEASUREMENTS), không cần giữ dữ liệu mãi mãi. Toàn bộ
+// dữ liệu KHÔNG GIỚI HẠN được sao lưu sang Google Sheets (qua Google Apps
+// Script Web App) mỗi khi có điểm đo mới VÀ trang web đang mở (không chạy
+// nền 24/7 - đã được người dùng xác nhận là đủ dùng cho đồ án).
+// Xem hướng dẫn deploy Web App trong: google-sheets-sync/README.md
+const BACKUP_URL_STORAGE_KEY = "floodIot.googleSheetsWebAppUrl";
+
+const backupState = {
+    webAppUrl: null,
+    sentCount: 0,
+    lastError: null,
+};
+
+function loadBackupUrl() {
+    try {
+        return localStorage.getItem(BACKUP_URL_STORAGE_KEY) || "";
+    } catch (error) {
+        console.error("Không đọc được localStorage (Google Sheets Web App URL):", error);
+        return "";
+    }
+}
+
+function saveBackupUrl(url) {
+    try {
+        localStorage.setItem(BACKUP_URL_STORAGE_KEY, url);
+    } catch (error) {
+        console.error("Không lưu được localStorage (Google Sheets Web App URL):", error);
+    }
+}
+
+const backupStatusDot = document.getElementById("backupStatusDot");
+const backupStatusText = document.getElementById("backupStatusText");
+const backupWebAppUrlInput = document.getElementById("backupWebAppUrlInput");
+const backupSaveUrlBtn = document.getElementById("backupSaveUrlBtn");
+const backupCounter = document.getElementById("backupCounter");
+
+function setBackupStatusDot(kind) {
+    // kind: "unknown" | "normal" (sẵn sàng/thành công) | "warning" (đang gửi) | "danger" (lỗi)
+    ALL_SEVERITY_CLASSES.forEach((c) => backupStatusDot.classList.remove(c));
+    const map = {
+        unknown: "is-unknown",
+        normal: "is-normal",
+        warning: "is-warning",
+        danger: "is-danger",
+    };
+    backupStatusDot.classList.add(map[kind] || "is-unknown");
+}
+
+function renderBackupStatus() {
+    backupCounter.textContent = `Đã sao lưu: ${backupState.sentCount} bản ghi trong phiên này.`;
+
+    if (!backupState.webAppUrl) {
+        setBackupStatusDot("unknown");
+        backupStatusText.textContent = "Chưa cấu hình Google Sheets Web App URL.";
+        return;
+    }
+    if (backupState.lastError) {
+        setBackupStatusDot("danger");
+        backupStatusText.textContent = `Lỗi khi sao lưu: ${backupState.lastError}`;
+        return;
+    }
+    setBackupStatusDot("normal");
+    backupStatusText.textContent = backupState.sentCount > 0
+        ? "Đang hoạt động - dữ liệu mới sẽ tự động sao lưu sang Google Sheets."
+        : "Đã cấu hình - sẵn sàng sao lưu khi có điểm đo mới.";
+}
+
+function initBackup() {
+    const savedUrl = loadBackupUrl();
+    backupState.webAppUrl = savedUrl || null;
+    backupWebAppUrlInput.value = savedUrl;
+    renderBackupStatus();
+}
+
+backupSaveUrlBtn.addEventListener("click", () => {
+    const url = backupWebAppUrlInput.value.trim();
+    if (url && !/^https:\/\/script\.google\.com\/macros\//.test(url)) {
+        backupWebAppUrlInput.setCustomValidity(
+            "URL không hợp lệ. Cần dán đúng URL Web App dạng https://script.google.com/macros/s/.../exec"
+        );
+        backupWebAppUrlInput.reportValidity();
+        return;
+    }
+    backupWebAppUrlInput.setCustomValidity("");
+    backupState.webAppUrl = url || null;
+    backupState.lastError = null;
+    saveBackupUrl(url);
+    flashSaved(backupSaveUrlBtn);
+    renderBackupStatus();
+
+    // Vừa cấu hình xong URL: gửi bù ngay dữ liệu lịch sử ĐÃ NẠP SẴN cho
+    // từng trạm (từ lúc mở trang, xem pendingBackfillByStation), không
+    // cần đợi có điểm đo mới mới bắt đầu sao lưu và không cần gọi lại
+    // Firebase lần nữa.
+    if (backupState.webAppUrl) {
+        Object.keys(pendingBackfillByStation).forEach((stationId) => {
+            backfillBackupForStation(stationId, pendingBackfillByStation[stationId]);
+        });
+    }
+});
+
+// Gửi 1 bản ghi sang Google Sheets. Không chặn luồng chính của web nếu
+// mạng lỗi hoặc Web App chưa cấu hình đúng - chỉ ghi log + cập nhật badge
+// trạng thái, KHÔNG throw ra ngoài, KHÔNG làm gián đoạn việc hiển thị dữ
+// liệu realtime trên giao diện.
+function sendToGoogleSheetsBackup(stationId, point) {
+    if (!backupState.webAppUrl) return;
+
+    const meta = STATION_META[stationId];
+    const payload = {
+        stationId,
+        stationName: meta.name,
+        timestamp: formatCsvTimestamp(point.t),
+        distance: point.distance,
+        rise: Number(point.rise.toFixed(3)),
+    };
+
+    // mode: "no-cors" vì Google Apps Script Web App (deploy "Ai cũng có
+    // thể truy cập") không trả CORS header cho phép đọc response từ
+    // trình duyệt - nhưng request POST vẫn được gửi và Apps Script vẫn
+    // ghi được dữ liệu vào Google Sheets, ta chỉ không đọc được response.
+    fetch(backupState.webAppUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload),
+    })
+        .then(() => {
+            backupState.sentCount += 1;
+            backupState.lastError = null;
+            renderBackupStatus();
+        })
+        .catch((error) => {
+            backupState.lastError = error.message || "Không gửi được yêu cầu (kiểm tra kết nối mạng).";
+            console.error(`[${stationId}] Lỗi khi sao lưu sang Google Sheets:`, error);
+            renderBackupStatus();
+        });
+}
+
+// ------------------------------------------------------------
+// "BÙ DỮ LIỆU" KHI MỞ LẠI WEB
+// ------------------------------------------------------------
+// Vấn đề: nếu web bị đóng trong lúc ESP32 vẫn gửi dữ liệu lên Firebase
+// (Stations/<id>/Measurement), những điểm đo đó KHÔNG được sao lưu sang
+// Google Sheets vì onValue(flood, ...) chỉ bắt được thay đổi khi trình
+// duyệt đang lắng nghe. Để không mất dữ liệu, mỗi khi mở lại web, hệ
+// thống sẽ gửi TOÀN BỘ Measurement đang có trên Firebase cho từng trạm
+// (tối đa MAX_MEASUREMENTS bản ghi/trạm - xem ghi chú ở hằng số đó) sang
+// Google Sheets theo dạng batch. Apps Script (Code.gs) tự lọc trùng theo
+// khoá "Trạm + Thời gian đo" nên gửi lại các bản ghi ĐÃ có trước đó là AN
+// TOÀN, không tạo dòng trùng lặp trong sheet.
+//
+// QUAN TRỌNG VỀ THỜI ĐIỂM GỌI: hàm này CHỈ được gọi từ bên trong khối
+// get(measurement).then(...) đã có sẵn (nạp lịch sử cho biểu đồ khi mở
+// trang) - dùng LẠI đúng dữ liệu vừa tải về, KHÔNG gọi get() thêm một
+// lần riêng ở top-level của module. Lý do: nếu gọi get() ngay khi module
+// script.js bắt đầu chạy (trước khi Firebase SDK kịp kết nối/đồng bộ),
+// có rủi ro đọc phải dữ liệu rỗng do race condition, khiến việc bù dữ
+// liệu bị bỏ sót ngay từ lần tải trang - trong khi khối get(measurement)
+// hiện có đã hoạt động đúng cho việc vẽ biểu đồ nên tận dụng lại là an
+// toàn nhất.
+//
+// GIỚI HẠN CẦN LƯU Ý: cơ chế này chỉ bù được những gì Firebase CÒN GIỮ
+// (tối đa MAX_MEASUREMENTS bản ghi gần nhất/trạm). Nếu web bị đóng lâu
+// hơn khoảng thời gian để ESP32 ghi đủ số bản ghi đó, các điểm đo cũ
+// nhất sẽ bị Firebase tự xoá TRƯỚC KHI kịp bù sang Sheets và mất vĩnh
+// viễn - không có cách khắc phục nếu không có một tiến trình chạy nền
+// độc lập với việc mở/đóng web (ví dụ Cloud Functions), điều mà đồ án
+// hiện tại không cần vì thời gian đóng web dự kiến chỉ vài giờ đến 1-2
+// ngày, thấp hơn nhiều so với sức chứa hiện tại của bộ đệm Firebase.
+//
+// stationId: trạm nguồn. records: mảng { t: Date, distance, rise } đã
+// được tính sẵn (định dạng giống state.stations[id].history).
+function backfillBackupForStation(stationId, points) {
+    if (!backupState.webAppUrl || points.length === 0) return;
+
+    const meta = STATION_META[stationId];
+    const records = points.map((p) => ({
+        stationId,
+        stationName: meta.name,
+        timestamp: formatCsvTimestamp(p.t),
+        distance: p.distance,
+        rise: Number(p.rise.toFixed(3)),
+    }));
+
+    // mode: "no-cors" -> không đọc được response, nên chỉ báo là "đã gửi
+    // yêu cầu bù", KHÔNG khẳng định Google Sheets đã ghi thành công
+    // (Apps Script có thể vẫn lỗi phía server mà web không biết được, vì
+    // lý do CORS như đã giải thích ở sendToGoogleSheetsBackup() trên).
+    fetch(backupState.webAppUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ records }),
+    })
+        .then(() => {
+            console.log(`[${stationId}] Đã gửi yêu cầu bù ${records.length} bản ghi sang Google Sheets (bù dữ liệu khi mở lại web).`);
+        })
+        .catch((error) => {
+            console.error(`[${stationId}] Lỗi khi bù dữ liệu sang Google Sheets:`, error);
+            backupState.lastError = error.message || "Không gửi được yêu cầu bù dữ liệu.";
+            renderBackupStatus();
+        });
+}
+
+// Danh sách "việc bù dữ liệu đang chờ" - dùng khi người dùng cấu hình
+// Web App URL SAU KHI lịch sử Measurement của các trạm đã được nạp
+// xong (trường hợp thường gặp: mở web trước, dán URL sau). Mỗi trạm chỉ
+// lưu 1 bộ dữ liệu mới nhất đã nạp được.
+const pendingBackfillByStation = {};
+
+initBackup();
 
 function buildNavItem(stationId) {
     const fragment = navStationTemplate.content.cloneNode(true);
@@ -1006,27 +1314,50 @@ function renderRecentAlerts() {
 // ------------------------------------------------------------
 // ƯỚC TÍNH TỐC ĐỘ TRUYỀN LŨ GIỮA CÁC TRẠM
 // ------------------------------------------------------------
-// Với mỗi trạm, tìm điểm ĐẦU TIÊN trong lịch sử mà mức dâng (rise) đạt
-// tới ngưỡng đang chọn (riseThreshold), theo thứ tự thời gian tăng dần.
-// Nội suy tuyến tính giữa 2 điểm đo liền kề để có thời điểm chính xác
-// hơn thay vì chỉ lấy đúng điểm đo rời rạc.
-function findRiseCrossingTime(stationId, threshold) {
+// CƠ CHẾ MỚI (tự động, không cần người dùng nhập mức nước dâng cụ thể):
+// với mỗi trạm, quét lịch sử "rise" theo thời gian tăng dần và tìm ĐIỂM
+// BẮT ĐẦU của đợt dâng gần nhất - tức là điểm mà độ dốc rise (m/phút)
+// bắt đầu vượt RISE_START_MIN_SLOPE_PER_MIN và duy trì liên tục qua ít
+// nhất RISE_START_MIN_CONSECUTIVE_POINTS điểm đo kế tiếp. Đây thay thế
+// hoàn toàn cách làm cũ (tìm thời điểm rise vượt một ngưỡng mét cố định
+// do người dùng nhập).
+//
+// afterTime (tuỳ chọn): nếu có, chỉ xét các điểm bắt đầu dâng xảy ra SAU
+// thời điểm này - dùng khi khớp sự kiện của trạm đích với sự kiện đã
+// tìm được ở trạm nguồn (lấy đợt dâng gần nhất xảy ra sau đó).
+function detectRiseStartEvent(stationId, afterTime) {
     const s = state.stations[stationId];
     if (!isStationConnected(stationId)) return null;
     const sorted = [...s.history].sort((a, b) => a.t.getTime() - b.t.getTime());
+    const minSpan = RISE_START_MIN_CONSECUTIVE_POINTS - 1;
 
     for (let i = 0; i < sorted.length; i += 1) {
-        if (sorted[i].rise >= threshold) {
-            if (i === 0) return sorted[i].t;
-            const prev = sorted[i - 1];
-            const curr = sorted[i];
-            if (prev.rise >= threshold) continue; // đã đạt ngưỡng từ trước, không phải lần đầu vượt
-            // Nội suy tuyến tính giữa prev (chưa đạt) và curr (đã đạt)
-            const riseSpan = curr.rise - prev.rise;
-            if (Math.abs(riseSpan) < 1e-9) return curr.t;
-            const ratio = (threshold - prev.rise) / riseSpan;
-            const tSpanMs = curr.t.getTime() - prev.t.getTime();
-            return new Date(prev.t.getTime() + ratio * tSpanMs);
+        if (afterTime && sorted[i].t.getTime() <= afterTime.getTime()) continue;
+
+        // Cần đủ điểm phía sau i để kiểm tra chuỗi dâng liên tục.
+        if (i + minSpan >= sorted.length) break;
+
+        let isRisingRun = true;
+        for (let k = i; k < i + minSpan; k += 1) {
+            const a = sorted[k];
+            const b = sorted[k + 1];
+            const minutes = (b.t.getTime() - a.t.getTime()) / 60000;
+            if (minutes <= 0) {
+                isRisingRun = false;
+                break;
+            }
+            const slope = (b.rise - a.rise) / minutes;
+            if (slope < RISE_START_MIN_SLOPE_PER_MIN) {
+                isRisingRun = false;
+                break;
+            }
+        }
+
+        if (isRisingRun) {
+            // Điểm i là điểm cuối cùng TRƯỚC KHI đợt dâng bắt đầu tăng rõ
+            // rệt (hoặc chính là điểm khởi đầu nếu i === 0) -> coi đây là
+            // thời điểm bắt đầu đợt dâng.
+            return sorted[i].t;
         }
     }
     return null;
@@ -1050,7 +1381,6 @@ function getPairDistanceKm(pairKey) {
 function renderFlowSpeedPanel() {
     const pairKey = state.activeFlowPair;
     const pair = FLOW_PAIRS[pairKey];
-    const threshold = state.riseThreshold;
     const distanceKm = getPairDistanceKm(pairKey);
 
     const fromMeta = STATION_META[pair.from];
@@ -1058,16 +1388,20 @@ function renderFlowSpeedPanel() {
     const fromState = state.stations[pair.from];
     const toState = state.stations[pair.to];
 
-    const fromTime = findRiseCrossingTime(pair.from, threshold);
-    const toTime = findRiseCrossingTime(pair.to, threshold);
+    // Tự động phát hiện: thời điểm trạm nguồn bắt đầu một đợt dâng, rồi
+    // tìm đợt dâng gần nhất của trạm đích xảy ra SAU thời điểm đó (được
+    // xem là cùng một đợt lũ truyền tới) - không còn phụ thuộc vào một
+    // mức nước dâng cố định do người dùng nhập.
+    const fromTime = detectRiseStartEvent(pair.from);
+    const toTime = fromTime ? detectRiseStartEvent(pair.to, fromTime) : detectRiseStartEvent(pair.to);
 
     const resultEl = document.getElementById("flowResult");
 
     const fromConnected = isStationConnected(pair.from);
     const toConnected = isStationConnected(pair.to);
 
-    const fromTimeText = fromTime ? formatClockDateTime(fromTime) : "Chưa đạt mức dâng này";
-    const toTimeText = toTime ? formatClockDateTime(toTime) : "Chưa đạt mức dâng này";
+    const fromTimeText = fromTime ? formatClockDateTime(fromTime) : "Chưa phát hiện đợt dâng";
+    const toTimeText = toTime ? formatClockDateTime(toTime) : "Chưa phát hiện đợt dâng";
 
     let metricsHtml = "";
     let noteHtml = "";
@@ -1075,11 +1409,9 @@ function renderFlowSpeedPanel() {
     if (!fromConnected || !toConnected) {
         noteHtml = `<p class="flow-result-note">Cần cả hai trạm (${fromMeta.name}, ${toMeta.name}) có dữ liệu thật để ước tính tốc độ truyền lũ. Trạm chưa kết nối sẽ không có dữ liệu để phân tích.</p>`;
     } else if (!fromTime || !toTime) {
-        noteHtml = `<p class="flow-result-note">Chưa đủ dữ liệu: cần cả ${fromMeta.name} và ${toMeta.name} cùng đạt mức nước dâng <strong>+${threshold.toFixed(
-            2
-        )} m</strong> so với mực nước tham chiếu riêng của từng trạm để tính được thời gian truyền lũ.</p>`;
+        noteHtml = `<p class="flow-result-note">Chưa đủ dữ liệu: hệ thống cần phát hiện được đợt dâng ở ${fromMeta.name} và một đợt dâng tương ứng xảy ra sau đó ở ${toMeta.name} thì mới tự động tính được thời gian truyền lũ.</p>`;
     } else if (toTime.getTime() < fromTime.getTime()) {
-        noteHtml = `<p class="flow-result-note">${toMeta.name} đạt mức dâng +${threshold.toFixed(2)} m trước ${fromMeta.name} — không phù hợp với chiều truyền lũ ${fromMeta.name} → ${toMeta.name} đang chọn. Vui lòng kiểm tra lại dữ liệu hoặc chọn mức dâng khác.</p>`;
+        noteHtml = `<p class="flow-result-note">${toMeta.name} bắt đầu dâng trước ${fromMeta.name} — không phù hợp với chiều truyền lũ ${fromMeta.name} → ${toMeta.name} đang chọn. Vui lòng kiểm tra lại dữ liệu.</p>`;
     } else {
         const timeDiffMs = toTime.getTime() - fromTime.getTime();
         const timeDiffHours = timeDiffMs / 3600000;
@@ -1104,11 +1436,11 @@ function renderFlowSpeedPanel() {
     }
 
     const fromBadge = fromTime
-        ? `<span class="flow-result-badge is-done">✔ Đã đạt +${threshold.toFixed(2)} m</span>`
-        : `<span class="flow-result-badge">⏳ Đang chờ</span>`;
+        ? `<span class="flow-result-badge is-done">✔ Đã phát hiện đợt dâng</span>`
+        : `<span class="flow-result-badge">⏳ Đang theo dõi</span>`;
     const toBadge = toTime
-        ? `<span class="flow-result-badge is-done">✔ Đã đạt +${threshold.toFixed(2)} m</span>`
-        : `<span class="flow-result-badge">⏳ Đang chờ</span>`;
+        ? `<span class="flow-result-badge is-done">✔ Đã phát hiện đợt dâng</span>`
+        : `<span class="flow-result-badge">⏳ Đang theo dõi</span>`;
 
     resultEl.innerHTML = `
         <div class="flow-result-route">
@@ -1150,20 +1482,12 @@ function formatClockDateTime(date) {
 // ------------------------------------------------------------
 // SỰ KIỆN GIAO DIỆN - ƯỚC TÍNH TỐC ĐỘ TRUYỀN LŨ
 // ------------------------------------------------------------
-const riseThresholdInput = document.getElementById("riseThresholdInput");
 const editDistancesBtn = document.getElementById("editDistancesBtn");
 const distanceEditor = document.getElementById("distanceEditor");
 const distanceInput12 = document.getElementById("distanceInput-1-2");
 const distanceInput23 = document.getElementById("distanceInput-2-3");
 const saveDistancesBtn = document.getElementById("saveDistancesBtn");
 const flowPairTabs = document.querySelectorAll(".flow-pair-tab");
-
-riseThresholdInput.addEventListener("input", () => {
-    const val = parseFloat(riseThresholdInput.value);
-    if (!Number.isFinite(val)) return;
-    state.riseThreshold = val;
-    renderFlowSpeedPanel();
-});
 
 editDistancesBtn.addEventListener("click", () => {
     const isHidden = distanceEditor.hidden;
@@ -1345,9 +1669,14 @@ STATION_IDS.forEach((stationId) => {
             // suy ra tốc độ vô lý. Chỉ fallback về thời điểm nhận khi ESP32
             // không gửi kèm timestamp hợp lệ.
             const measuredAt = parseVNDateTimeToDate(s.lastUpdateRaw) || new Date();
-            s.history.push({ t: measuredAt, distance, rise: computeRise(distance, s.initialLevel) });
+            const newPoint = { t: measuredAt, distance, rise: computeRise(distance, s.initialLevel) };
+            s.history.push(newPoint);
             s.history.sort((a, b) => a.t.getTime() - b.t.getTime());
             if (s.history.length > CLIENT_HISTORY_LIMIT) s.history.shift();
+
+            // Sao lưu điểm đo mới sang Google Sheets (nếu đã cấu hình URL) -
+            // chỉ chạy khi web đang mở, không chặn luồng chính nếu lỗi mạng.
+            sendToGoogleSheetsBackup(stationId, newPoint);
         }
 
         if (changed) cleanupOldMeasurements(stationId, measurement);
@@ -1402,19 +1731,36 @@ STATION_IDS.forEach((stationId) => {
             const data = snapshot.val();
             if (!data) return;
             const s = state.stations[stationId];
-            const points = Object.keys(data)
+            const rawPoints = Object.keys(data)
                 .sort()
                 .map((key) => {
                     const rec = data[key] || {};
-                    const t = parseVNDateTimeToDate(rec.Timestamp) || new Date();
+                    const parsedT = parseVNDateTimeToDate(rec.Timestamp);
                     const distance = Number(rec.WaterLevel);
-                    return { t, distance, rise: computeRise(distance, s.initialLevel) };
+                    return { parsedT, distance };
                 })
                 .filter((p) => Number.isFinite(p.distance) && p.distance >= 0); // bỏ qua bản ghi ngoài tầm đo (-1)
+
+            const points = rawPoints.map((p) => ({
+                t: p.parsedT || new Date(),
+                distance: p.distance,
+                rise: computeRise(p.distance, s.initialLevel),
+            }));
 
             s.history.unshift(...points);
             if (state.currentViewId === stationId) renderChartForStation(stationId);
             renderHomeIfActive();
+
+            // "Bù dữ liệu" sang Google Sheets: dùng LẠI đúng dữ liệu vừa
+            // tải ở trên, chỉ lọc chặt hơn (bỏ luôn bản ghi không có
+            // Timestamp hợp lệ - KHÔNG dùng thời gian fallback như trên,
+            // vì gửi sai thời điểm đo sẽ làm sai khoá chống trùng ở Apps
+            // Script và làm sai dữ liệu lưu trữ dài hạn).
+            const backfillPoints = rawPoints
+                .filter((p) => p.parsedT !== null)
+                .map((p) => ({ t: p.parsedT, distance: p.distance, rise: computeRise(p.distance, s.initialLevel) }));
+            pendingBackfillByStation[stationId] = backfillPoints;
+            if (backupState.webAppUrl) backfillBackupForStation(stationId, backfillPoints);
         })
         .catch((error) => console.error(`[${stationId}] Lỗi khi tải lịch sử Measurement:`, error));
 });
