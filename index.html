@@ -158,6 +158,37 @@
                 </article>
             </div>
 
+            <!-- ==================================================== -->
+            <!-- SAO LƯU DỮ LIỆU DÀI HẠN SANG GOOGLE SHEETS            -->
+            <!-- Mỗi khi Firebase báo có điểm đo mới (trong lúc trang  -->
+            <!-- web đang mở), điểm đo đó được gửi thêm 1 bản sang     -->
+            <!-- Google Sheets để lưu vĩnh viễn, không bị Firebase tự  -->
+            <!-- xoá theo MAX_MEASUREMENTS. Xem hướng dẫn deploy trong -->
+            <!-- README-google-sheets-sync.md.                        -->
+            <!-- ==================================================== -->
+            <section class="backup-panel" id="backupPanel">
+                <h3 class="panel-title">
+                    <span class="icon" aria-hidden="true">☁️</span>
+                    SAO LƯU DỮ LIỆU DÀI HẠN (GOOGLE SHEETS)
+                </h3>
+
+                <div class="backup-controls" id="backupControls">
+                    <div class="backup-status" id="backupStatus">
+                        <span class="status-dot is-unknown" id="backupStatusDot" aria-hidden="true"></span>
+                        <span id="backupStatusText">Chưa cấu hình Google Sheets Web App URL.</span>
+                    </div>
+                    <div class="backup-config-row">
+                        <input type="url" id="backupWebAppUrlInput" class="metric-input backup-url-input"
+                               placeholder="Dán Google Apps Script Web App URL vào đây"
+                               aria-label="Google Apps Script Web App URL">
+                        <button type="button" id="backupSaveUrlBtn" class="btn btn-set">
+                            <span class="icon" aria-hidden="true">💾</span> Lưu
+                        </button>
+                    </div>
+                    <p class="backup-counter" id="backupCounter">Đã sao lưu: 0 bản ghi trong phiên này.</p>
+                </div>
+            </section>
+
             <div class="home-panels-row" id="homePanelsRow">
 
                 <!-- ==================================================== -->
@@ -170,15 +201,9 @@
                     </h3>
 
                     <div class="flow-speed-controls" id="flowSpeedControls">
-                        <div class="flow-speed-control-item">
-                            <label for="riseThresholdInput">Mức nước dâng để phân tích:</label>
-                            <div class="flow-speed-input-group">
-                                <input type="number" id="riseThresholdInput" class="metric-input"
-                                       value="1.00" step="0.05" min="0" inputmode="decimal"
-                                       aria-label="Mức nước dâng để phân tích">
-                                <span class="metric-unit">m</span>
-                            </div>
-                        </div>
+                        <p class="flow-speed-auto-note">
+                            Hệ thống tự động theo dõi mực nước từng trạm và tự nhận diện thời điểm bắt đầu một đợt dâng để tính thời gian/tốc độ truyền lũ — không cần nhập mức nước dâng.
+                        </p>
 
                         <div class="flow-speed-control-item">
                             <span class="flow-speed-control-label">Khoảng cách giữa các trạm (km):</span>
@@ -218,10 +243,15 @@
                 <!-- BIỂU ĐỒ SO SÁNH XU HƯỚNG MỰC NƯỚC DÂNG 3 TRẠM         -->
                 <!-- ==================================================== -->
                 <section class="chart-panel" id="homeChartPanel">
-                    <h3 class="chart-panel-title">
-                        <span class="icon" aria-hidden="true">📈</span>
-                        Biểu đồ xu hướng mức nước dâng các trạm
-                    </h3>
+                    <div class="chart-panel-header">
+                        <h3 class="chart-panel-title">
+                            <span class="icon" aria-hidden="true">📈</span>
+                            Biểu đồ xu hướng mức nước dâng các trạm
+                        </h3>
+                        <button type="button" class="btn btn-outline btn-export-csv" id="exportCsvAllBtn">
+                            <span class="icon" aria-hidden="true">⬇️</span> Xuất CSV (tất cả trạm)
+                        </button>
+                    </div>
 
                     <div class="chart-range-tabs" id="homeChartRangeTabs" role="group" aria-label="Khoảng thời gian biểu đồ">
                         <button type="button" class="range-tab is-active" data-range="6h" aria-pressed="true">6 giờ</button>
@@ -407,10 +437,15 @@
 
                     <!-- E. BIỂU ĐỒ LỊCH SỬ MỨC NƯỚC DÂNG CỦA TRẠM NÀY -->
                     <section class="chart-panel">
-                        <h3 class="chart-panel-title">
-                            <span class="icon" aria-hidden="true">📈</span>
-                            Biểu đồ mức nước dâng (<span class="station-label" data-field="stationLabel">Trạm</span>)
-                        </h3>
+                        <div class="chart-panel-header">
+                            <h3 class="chart-panel-title">
+                                <span class="icon" aria-hidden="true">📈</span>
+                                Biểu đồ mức nước dâng (<span class="station-label" data-field="stationLabel">Trạm</span>)
+                            </h3>
+                            <button type="button" class="btn btn-outline btn-export-csv" data-field="exportCsvBtn">
+                                <span class="icon" aria-hidden="true">⬇️</span> Xuất CSV
+                            </button>
+                        </div>
 
                         <div class="chart-range-tabs" data-field="chartRangeTabs" role="group" aria-label="Khoảng thời gian biểu đồ">
                             <button type="button" class="range-tab is-active" data-range="6h" aria-pressed="true">6 giờ</button>
