@@ -73,6 +73,47 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const database = getDatabase(app);
 const connectedRef = ref(database, ".info/connected");
+// Độ lệch (ms) giữa đồng hồ máy chủ Firebase và đồng hồ máy tính đang mở
+// web. Dùng để quy đổi "UpdatedAt" (giờ máy chủ, do ESP32 ghi bằng
+// {".sv":"timestamp"}) sang tuổi dữ liệu chính xác - không phụ thuộc đồng
+// hồ máy tính hay đồng hồ ESP32 lệch nhau.
+const serverTimeOffsetRef = ref(database, ".info/serverTimeOffset");
+let serverTimeOffsetMs = 0;
+function serverNow() {
+    return Date.now() + serverTimeOffsetMs;
+}
+
+function getChartHistory(stationId, scope) {
+    const clearedThrough = state.chartHistoryClearThrough[scope][stationId];
+    const history = state.stations[stationId].history;
+    return clearedThrough === undefined
+        ? history
+        : history.filter((point) => point.t.getTime() > clearedThrough);
+}
+
+function clearChartHistory(stationId = null) {
+    const scope = stationId ? "stations" : "home";
+    const stationIds = stationId ? [stationId] : STATION_IDS;
+
+    stationIds.forEach((id) => {
+        const history = state.stations[id].history;
+        const latestTimestamp = history.reduce(
+            (latest, point) => Math.max(latest, point.t.getTime()),
+            serverNow()
+        );
+        const previousCutoff = state.chartHistoryClearThrough[scope][id];
+        state.chartHistoryClearThrough[scope][id] =
+            previousCutoff === undefined ? latestTimestamp : Math.max(previousCutoff, latestTimestamp);
+    });
+
+    if (stationId) {
+        stationCharts[stationId].resetZoom();
+        renderChartForStation(stationId);
+    } else {
+        homeChart.resetZoom();
+        renderHomeChart();
+    }
+}
 
 // ------------------------------------------------------------
 // HẰNG SỐ
@@ -86,30 +127,58 @@ const connectedRef = ref(database, ".info/connected");
 const MAX_MEASUREMENTS = 200;
 const CLIENT_HISTORY_LIMIT = 500; // số điểm tối đa giữ trong bộ nhớ trình duyệt để vẽ biểu đồ/dự đoán/ước tính tốc độ truyền lũ
 
-// Trạm 1 dùng SENSOR_INTERVAL=15s (chế độ test) trong code ESP32 hiện tại.
-// Nếu sau này đổi ESP32 sang chu kỳ thật (30 phút), PHẢI tăng hằng số này
-// tương ứng (ví dụ 2 * 30 * 60 * 1000), nếu không hệ thống sẽ báo "Mất kết
-// nối" sai dù ESP32 vẫn hoạt động bình thường.
-const STALE_MS = 90 * 1000; // quá 90s không có dữ liệu mới -> coi là mất kết nối/dữ liệu cũ
+// CHU KỲ ĐO (phút) do người dùng đặt trên Web cho từng trạm, lưu tại
+// Stations/<stationId>/Configuration/MeasureIntervalMin - ESP32 đọc giá trị
+// này và áp dụng cho các chu kỳ đo kế tiếp (không cần sửa/nạp lại code).
+// Giới hạn và mặc định PHẢI trùng với MIN/MAX/DEFAULT_MEASURE_INTERVAL_MIN
+// trong code ESP32 (DoAnTN_Tram01.ino).
+const DEFAULT_MEASURE_INTERVAL_MIN = 5;
+const MIN_MEASURE_INTERVAL_MIN = 1;
+const MAX_MEASURE_INTERVAL_MIN = 1440; // 24 giờ
+
+// Ngưỡng "mất kết nối/dữ liệu cũ" giờ TỰ THAY ĐỔI theo chu kỳ đo của từng
+// trạm (xem staleMsFor) thay vì cố định 30s: quá (1.5 x chu kỳ + 30s) không có
+// dữ liệu mới -> coi là mất kết nối. 30s dôi ra bù cho thời gian ESP32 đo
+// 10 lần (~1-2s) + gửi Firebase (vài giây, lâu hơn qua 4G).
+const STALE_GRACE_MS = 30 * 1000;
+function staleMsFor(s) {
+    let minutes = Number.isFinite(s.measureIntervalMin) ? s.measureIntervalMin : DEFAULT_MEASURE_INTERVAL_MIN;
+    // Vừa đổi chu kỳ đo trên Web: ESP32 cần tới ~30s mới đọc được giá trị
+    // mới, và lần đo kế tiếp vẫn có thể tính theo chu kỳ CŨ. Trong khoảng đó
+    // dùng chu kỳ lớn hơn (cũ/mới) để không báo "Mất kết nối" sai ngay sau
+    // khi người dùng giảm chu kỳ đo (ví dụ 5 phút -> 1 phút).
+    if (s.intervalGraceUntil && Date.now() < s.intervalGraceUntil && Number.isFinite(s.prevMeasureIntervalMin)) {
+        minutes = Math.max(minutes, s.prevMeasureIntervalMin);
+    }
+    return minutes * 60 * 1000 * 1.5 + STALE_GRACE_MS;
+}
+
+// Tuổi dữ liệu của trạm (ms) = bây giờ - lần cuối THIẾT BỊ gửi lên.
+//   - Firmware mới: có "UpdatedAt" (giờ MÁY CHỦ Firebase lúc nhận) ->
+//     tuổi = serverNow() - UpdatedAt. Đúng ngay cả khi vừa mở trang (dữ liệu
+//     cũ từ hôm trước sẽ bị nhận ra là cũ), và KHÔNG bị ảnh hưởng khi chính
+//     Web ghi WarningLevel vào FloodSystem (Web không đụng tới UpdatedAt).
+//   - Firmware cũ (không có UpdatedAt): dùng thời điểm trình duyệt nhận
+//     được một lần gửi MỚI của thiết bị (Seq/LastUpdate thay đổi) - xem
+//     onValue(flood, ...).
+function stationDataAgeMs(s) {
+    if (Number.isFinite(s.deviceUpdatedAt)) return serverNow() - s.deviceUpdatedAt;
+    if (s.lastReceivedAt) return Date.now() - s.lastReceivedAt;
+    return Infinity;
+}
 
 const MIN_HARDWARE_THRESHOLD = 0.05; // ngưỡng khoảng cách tối thiểu hợp lệ gửi cho ESP32 (m)
 
 const DEFAULT_INITIAL_LEVEL = 0.5;
 const DEFAULT_ALERT_LEVELS = { level1: 0.5, level2: 0.8, level3: 1.0 };
 const DEFAULT_DISTANCES = { "1-2": 5.0, "2-3": 7.0 }; // km - chỉnh được trên giao diện, không hard-code cố định
-
-// ------------------------------------------------------------
-// PHÁT HIỆN TỰ ĐỘNG "THỜI ĐIỂM BẮT ĐẦU DÂNG" (thay cho ngưỡng mức dâng
-// cố định do người dùng nhập trước đây - xem detectRiseStartEvent()).
-// ------------------------------------------------------------
-// Độ dốc tối thiểu (m/phút) để coi một chuỗi điểm đo là "đang dâng thật
-// sự", không phải nhiễu đo đạc của cảm biến siêu âm. Độ nhạy "trung
-// bình": đủ thấp để bắt được các đợt dâng vừa phải, đủ cao để không báo
-// nhầm do sai số cảm biến (thường dao động vài mm quanh giá trị thật).
-const RISE_START_MIN_SLOPE_PER_MIN = 0.02;
-// Số điểm đo liên tiếp (kể cả điểm bắt đầu) phải cùng cho thấy xu hướng
-// dâng thì mới chấp nhận đó là khởi đầu một đợt dâng thật.
-const RISE_START_MIN_CONSECUTIVE_POINTS = 3;
+// GHI CHÚ (đã bỏ ngưỡng cố định người dùng nhập): trước đây có
+// DEFAULT_RISE_THRESHOLD (m) để người dùng tự chọn "mức dâng cần đạt"
+// trước khi tính tốc độ truyền lũ. Theo yêu cầu mới, KHÔNG còn ngưỡng cố
+// định nào cả - xem findRiseCrossingTime() bên dưới: mỗi khi trạm nguồn
+// đạt một mức dâng CAO NHẤT MỚI (so với mọi điểm đo trước đó của chính
+// nó), hệ thống tự lấy đúng giá trị đó làm mức cần so sánh với trạm đích,
+// không cần người dùng nhập tay nữa.
 
 const RANGE_MS = {
     "6h": 6 * 3600 * 1000,
@@ -117,6 +186,15 @@ const RANGE_MS = {
     "24h": 24 * 3600 * 1000,
     "7d": 7 * 24 * 3600 * 1000,
 };
+
+// Khoảng trống tối thiểu (10 phút) để ngắt đường nối trên biểu đồ; với chu kỳ
+// đo dài hơn, ngưỡng này tự nới ra thành 2.5 x chu kỳ (xem chartGapMsFor) -
+// nếu không, mọi điểm cách nhau > 10 phút sẽ bị ngắt và không có đường nối.
+const MIN_CHART_GAP_MS = 10 * 60 * 1000;
+function chartGapMsFor(intervalMin) {
+    const minutes = Number.isFinite(intervalMin) ? intervalMin : DEFAULT_MEASURE_INTERVAL_MIN;
+    return Math.max(MIN_CHART_GAP_MS, minutes * 60 * 1000 * 2.5);
+}
 
 const HORIZON_LABEL = { 30: "30 phút", 60: "60 phút", 180: "3 giờ" };
 
@@ -154,10 +232,19 @@ const SEVERITY_DESC = {
 const ALL_SEVERITY_CLASSES = ["is-normal", "is-warning", "is-danger", "is-critical", "is-unknown"];
 
 const STATION_IDS = ["station-1", "station-2", "station-3"];
+// LƯU Ý QUAN TRỌNG (đã sửa): "hasHardware" KHÔNG còn hard-code cố định ở
+// đây nữa. Trước đây Trạm 2/3 bị gán cứng false nên web không bao giờ
+// lắng nghe Firebase (onValue) cho các trạm đó, dẫn tới việc dù ESP32 đã
+// nạp code và gửi dữ liệu thật lên đúng nhánh Stations/station-2/... thì
+// web vẫn luôn hiển thị "Chưa kết nối" và khoá toàn bộ input/nút SET.
+// Giờ đây MỌI trạm trong STATION_IDS đều được lắng nghe Firebase như
+// nhau; trạng thái "đã kết nối" được xác định ĐỘNG dựa trên việc trạm đó
+// đã từng nhận được dữ liệu FloodSystem thật hay chưa - xem
+// state.stations[id].hasReceivedData và hàm isStationConnected() bên dưới.
 const STATION_META = {
-    "station-1": { name: "Trạm 1", deviceId: "ESP32-STATION-01", hasHardware: true, color: "#2196f3" },
-    "station-2": { name: "Trạm 2", deviceId: "--", hasHardware: false, color: "#00a651" },
-    "station-3": { name: "Trạm 3", deviceId: "--", hasHardware: false, color: "#d9534f" },
+    "station-1": { name: "Trạm 1", deviceId: "ESP32-STATION-01", color: "#2196f3" },
+    "station-2": { name: "Trạm 2", deviceId: "ESP32-STATION-02", color: "#00a651" },
+    "station-3": { name: "Trạm 3", deviceId: "--", color: "#d9534f" },
 };
 
 // Cặp trạm liền kề dùng để ước tính tốc độ truyền lũ (khoảng cách chỉnh
@@ -178,12 +265,24 @@ function createStationState(stationId) {
         distance: null, // giá trị thô từ cảm biến (m), có thể là -1 (ngoài tầm đo)
         outOfRange: false,
         lastUpdateRaw: null, // chuỗi "YYYY-MM-DD HH:MM:SS" từ ESP32
-        lastReceivedAt: null, // Date.now() lúc web nhận được cập nhật gần nhất
+        lastReceivedAt: null, // Date.now() lúc web nhận được một lần gửi MỚI của thiết bị (dự phòng cho firmware cũ)
+        deviceUpdatedAt: null, // FloodSystem/UpdatedAt - giờ máy chủ Firebase (ms) lúc thiết bị gửi lần cuối
+        deviceStamp: null, // "Seq|LastUpdate|UpdatedAt" của lần gửi gần nhất - để phân biệt thiết bị gửi mới với Web tự ghi WarningLevel
+        prevMeasureIntervalMin: null, // chu kỳ đo trước khi đổi (xem staleMsFor)
+        intervalGraceUntil: 0,
         initialLevel: DEFAULT_INITIAL_LEVEL, // mực nước tham chiếu
         alertLevels: { ...DEFAULT_ALERT_LEVELS },
         history: [], // [{ t: Date, distance: number, rise: number }] - dùng vẽ biểu đồ/dự đoán/ước tính tốc độ
         webSettingsInitialized: false,
         isCleaningUp: false,
+        // true ngay khi Firebase trả về node Stations/<id>/FloodSystem có dữ
+        // liệu thật (khác null) LẦN ĐẦU TIÊN - đây là cách web tự phát hiện
+        // "trạm này đã có ESP32 thật đang gửi dữ liệu", KHÔNG hard-code nữa.
+        hasReceivedData: false,
+        // Chu kỳ đo (phút) hiện đang áp dụng cho trạm này - đồng bộ từ
+        // Stations/<id>/Configuration/MeasureIntervalMin (xem onValue bên dưới).
+        // Chưa đặt trên Firebase => dùng mặc định (trùng mặc định của ESP32).
+        measureIntervalMin: DEFAULT_MEASURE_INTERVAL_MIN,
     };
 }
 
@@ -192,8 +291,14 @@ const state = {
     activeRange: "6h", // dùng chung cho biểu đồ trang chủ + từng trạm (đơn giản hoá, đồng bộ mốc thời gian)
     firebaseConnected: false,
     activeFlowPair: "1-2",
+    // Kết quả tốc độ truyền lũ GẦN NHẤT đã tính được cho từng cặp trạm.
+    // Được giữ nguyên (và hiển thị) cho tới khi có kết quả MỚI thay thế.
+    // Đồng bộ với Firebase: WebSettings/FlowSpeedResults/<pairKey> để không mất khi F5.
+    // Mỗi phần tử: { fromTime, toTime, targetRise, refDistance, computedAt } | null
+    flowResults: { "1-2": null, "2-3": null, "1-3": null },
     distances: { ...DEFAULT_DISTANCES },
     distancesInitialized: false,
+    chartHistoryClearThrough: { home: {}, stations: {} },
     stations: {
         "station-1": createStationState("station-1"),
         "station-2": createStationState("station-2"),
@@ -209,11 +314,13 @@ function stationRefs(stationId) {
         flood: ref(database, `Stations/${stationId}/FloodSystem`),
         measurement: ref(database, `Stations/${stationId}/Measurement`),
         configuration: ref(database, `Stations/${stationId}/Configuration`),
+        measureInterval: ref(database, `Stations/${stationId}/Configuration/MeasureIntervalMin`),
         webSettings: ref(database, `WebSettings/${stationId}`),
     };
 }
 
 const distancesRef = ref(database, "WebSettings/StationDistances");
+const flowResultsRef = ref(database, "WebSettings/FlowSpeedResults");
 
 // ------------------------------------------------------------
 // HÀM TIỆN ÍCH
@@ -258,6 +365,25 @@ function parseVNDateTimeToDate(raw) {
     return new Date(y, mo - 1, d, h, mi, s);
 }
 
+// QUAN TRỌNG (sửa lỗi "biểu đồ trang chủ hiện sai/trục thời gian kéo dài
+// bất thường"): sau khi bỏ việc ép cứng scales.x.min/max, biểu đồ tự co
+// giãn theo đúng min/max của DỮ LIỆU THẬT - nhưng nếu có dù chỉ 1 điểm với
+// mốc thời gian bị lỗi (ví dụ đồng hồ ESP32/RTC chưa đồng bộ, hoặc dữ liệu
+// cũ còn sót với ngày tháng sai) rơi vào TƯƠNG LAI so với đồng hồ trình
+// duyệt, bộ lọc "age = now - t <= rangeMs" ở renderChartForStation()/
+// renderHomeChart() KHÔNG loại được nó - vì age khi đó ÂM, luôn <= rangeMs
+// (dương) dù chênh lệch thực tế lên tới hàng chục giờ. Một điểm "tương lai"
+// duy nhất như vậy đủ để kéo giãn toàn bộ trục X ra rất xa, ép mọi điểm
+// thật còn lại dồn cục vào một góc - đúng hiện tượng bạn thấy ở biểu đồ
+// trang chủ (Trạm 2/3 hiện tách biệt hẳn xa bên phải).
+// Cho phép sai lệch nhỏ (vài phút) giữa đồng hồ ESP32 và trình duyệt do độ
+// trễ mạng, nhưng KHÔNG chấp nhận mốc thời gian ở tương lai xa - dữ liệu đo
+// không thể "đến từ tương lai".
+const FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
+function isPlausibleMeasurementTime(date) {
+    return date instanceof Date && !isNaN(date.getTime()) && date.getTime() <= Date.now() + FUTURE_TOLERANCE_MS;
+}
+
 // Hồi quy tuyến tính đơn giản (least squares) trên (phút, mức dâng) để
 // ước lượng tốc độ thay đổi mực nước - CHỈ là ước lượng xu hướng thô từ
 // vài lần đo gần nhất, KHÔNG phải mô hình dự báo lũ chuyên sâu.
@@ -281,11 +407,11 @@ function linearSlopePerMinute(points) {
 }
 
 function isStationFresh(s) {
-    return !!s.lastReceivedAt && Date.now() - s.lastReceivedAt <= STALE_MS;
+    return stationDataAgeMs(s) <= staleMsFor(s);
 }
 
 function isStationConnected(stationId) {
-    return STATION_META[stationId].hasHardware;
+    return state.stations[stationId].hasReceivedData;
 }
 
 function stationSeverity(s, stationId) {
@@ -325,6 +451,24 @@ const stationEls = {};
 const stationCharts = {};
 let homeChart = null;
 
+const chartZoomPlugin = window.zoomPlugin || window.ChartZoom || window["chartjs-plugin-zoom"];
+if (chartZoomPlugin) Chart.register(chartZoomPlugin);
+
+const chartZoomOptions = {
+    zoom: {
+        wheel: {
+            enabled: true,
+            speed: 0.1,
+        },
+        mode: "xy",
+    },
+    pan: {
+        enabled: true,
+        mode: "xy",
+        threshold: 4,
+    },
+};
+
 function buildStationView(stationId) {
     const fragment = stationViewTemplate.content.cloneNode(true);
     const root = fragment.querySelector(".view--station");
@@ -363,6 +507,8 @@ function buildStationView(stationId) {
         predictionDelta: root.querySelector('[data-field="predictionDelta"]'),
         predictionTime: root.querySelector('[data-field="predictionTime"]'),
         chartRangeTabs: root.querySelector('[data-field="chartRangeTabs"]'),
+        zoomResetBtn: root.querySelector('[data-field="zoomResetBtn"]'),
+        clearHistoryBtn: root.querySelector('[data-field="clearHistoryBtn"]'),
         chartEmptyNote: root.querySelector('[data-field="chartEmptyNote"]'),
         waterChartCanvas: root.querySelector('[data-field="waterChart"]'),
         alertLevel1Input: root.querySelector('[data-field="alertLevel1Input"]'),
@@ -371,6 +517,8 @@ function buildStationView(stationId) {
         alertLevel1SetBtn: root.querySelector('[data-field="alertLevel1SetBtn"]'),
         alertLevel2SetBtn: root.querySelector('[data-field="alertLevel2SetBtn"]'),
         alertLevel3SetBtn: root.querySelector('[data-field="alertLevel3SetBtn"]'),
+        measureIntervalInput: root.querySelector('[data-field="measureIntervalInput"]'),
+        measureIntervalSetBtn: root.querySelector('[data-field="measureIntervalSetBtn"]'),
     };
 
     els.exportCsvBtn = root.querySelector('[data-field="exportCsvBtn"]');
@@ -402,8 +550,32 @@ function buildStationView(stationId) {
             maintainAspectRatio: false,
             animation: true,
             scales: {
+                // QUAN TRỌNG (sửa lỗi "mốc thời gian trên biểu đồ bị sai"):
+                // TRƯỚC ĐÂY trục X dùng "labels" dạng chuỗi (category scale
+                // mặc định của Chart.js) - loại trục này chia đều khoảng
+                // cách theo THỨ TỰ điểm, không theo THỜI GIAN THỰC, nên 2
+                // điểm cách nhau 15 giây và 2 điểm cách nhau 1 giờ sẽ hiển
+                // thị with khoảng cách bằng nhau trên biểu đồ. Đổi sang trục
+                // số thực (linear) dùng đúng mốc thời gian (mili-giây) làm
+                // toạ độ X, rồi format lại thành giờ:phút:giây khi hiển thị
+                // nhãn - đảm bảo vị trí điểm trên trục phản ánh đúng thời
+                // gian đo thực tế.
+                x: {
+                    type: "linear",
+                    ticks: {
+                        callback: (value) => formatChartLabel(new Date(value), state.activeRange),
+                    },
+                },
                 y: {
                     title: { display: true, text: "Mức nước dâng (m)" },
+                },
+            },
+            plugins: {
+                zoom: chartZoomOptions,
+                tooltip: {
+                    callbacks: {
+                        title: (items) => (items[0] ? new Date(items[0].parsed.x).toLocaleString("vi-VN") : ""),
+                    },
                 },
             },
         },
@@ -413,6 +585,9 @@ function buildStationView(stationId) {
     els.chartRangeTabs.querySelectorAll(".range-tab").forEach((btn) => {
         btn.addEventListener("click", () => setActiveRange(btn.dataset.range));
     });
+
+    els.zoomResetBtn.addEventListener("click", () => stationCharts[stationId].resetZoom());
+    els.clearHistoryBtn.addEventListener("click", () => clearChartHistory(stationId));
 
     els.predictionRange.addEventListener("change", () => renderPredictionForStation(stationId));
 
@@ -431,7 +606,7 @@ function buildStationView(stationId) {
                 const s = state.stations[stationId];
                 s.initialLevel = val;
                 recomputeHistoryRise(stationId);
-                if (meta.hasHardware) {
+                if (isStationConnected(stationId)) {
                     syncHardwareWarningLevel(stationId, flood, val, s.alertLevels.level3);
                 }
                 flashSaved(els.initialLevelSetBtn);
@@ -469,7 +644,7 @@ function buildStationView(stationId) {
             .then(() => {
                 const s = state.stations[stationId];
                 s.alertLevels = { level1: v1, level2: v2, level3: v3 };
-                if (meta.hasHardware) {
+                if (isStationConnected(stationId)) {
                     syncHardwareWarningLevel(stationId, flood, s.initialLevel, v3);
                 }
                 if (triggerBtn) flashSaved(triggerBtn);
@@ -484,6 +659,35 @@ function buildStationView(stationId) {
     els.alertLevel1SetBtn.addEventListener("click", () => handleSetAlertLevels(els.alertLevel1SetBtn));
     els.alertLevel2SetBtn.addEventListener("click", () => handleSetAlertLevels(els.alertLevel2SetBtn));
     els.alertLevel3SetBtn.addEventListener("click", () => handleSetAlertLevels(els.alertLevel3SetBtn));
+
+    // ------------------------------------------------------------
+    // CHU KỲ ĐO (phút): ghi lên Firebase để ESP32 đọc và áp dụng cho các
+    // chu kỳ đo kế tiếp. Chu kỳ đo = khoảng thời gian giữa 2 KẾT QUẢ ĐO
+    // CHÍNH THỨC (mỗi kết quả là trung bình 10 lần đo nội bộ trên ESP32),
+    // KHÔNG phải khoảng cách giữa các lần đo nội bộ.
+    // ------------------------------------------------------------
+    els.measureIntervalSetBtn.addEventListener("click", () => {
+        const val = parseFloat(els.measureIntervalInput.value);
+        if (!Number.isInteger(val) || val < MIN_MEASURE_INTERVAL_MIN || val > MAX_MEASURE_INTERVAL_MIN) {
+            els.measureIntervalInput.setCustomValidity(
+                `Nhập số phút nguyên từ ${MIN_MEASURE_INTERVAL_MIN} đến ${MAX_MEASURE_INTERVAL_MIN}.`
+            );
+            els.measureIntervalInput.reportValidity();
+            return;
+        }
+        els.measureIntervalInput.setCustomValidity("");
+
+        const { measureInterval } = stationRefs(stationId);
+        set(measureInterval, val)
+            .then(() => {
+                // state.stations[..].measureIntervalMin đã được onValue(measureInterval) cập nhật
+                flashSaved(els.measureIntervalSetBtn);
+                renderStation(stationId);
+                renderChartForStation(stationId);
+                renderHomeIfActive();
+            })
+            .catch((error) => console.error(`Lỗi khi lưu chu kỳ đo (${stationId}):`, error));
+    });
 
     els.exportCsvBtn.addEventListener("click", () => exportStationHistoryCsv(stationId));
 }
@@ -812,6 +1016,8 @@ document.getElementById("navItem-home").addEventListener("click", () => switchVi
 const homeChartCanvas = document.getElementById("homeWaterChart");
 const homeChartEmptyNote = document.getElementById("homeChartEmptyNote");
 const homeChartRangeTabs = document.querySelectorAll("#homeChartRangeTabs .range-tab");
+const homeChartZoomResetBtn = document.getElementById("homeChartZoomResetBtn");
+const homeChartClearHistoryBtn = document.getElementById("homeChartClearHistoryBtn");
 
 homeChart = new Chart(homeChartCanvas, {
     type: "line",
@@ -826,7 +1032,7 @@ homeChart = new Chart(homeChartCanvas, {
             tension: 0.35,
             fill: false,
             pointRadius: 3,
-            spanGaps: true,
+            spanGaps: false,
         })),
     },
     options: {
@@ -834,12 +1040,35 @@ homeChart = new Chart(homeChartCanvas, {
         maintainAspectRatio: false,
         animation: true,
         scales: {
+            // Giống biểu đồ từng trạm: trục X dùng mốc thời gian thực
+            // (linear) thay vì category theo danh sách nhãn gộp - trước đây
+            // gộp mốc thời gian của cả 3 trạm thành 1 mảng "labels" dùng
+            // chung rồi chia đều theo THỨ TỰ, khiến vị trí của Trạm 2/3 bị
+            // lệch so với thời gian thực mỗi khi mật độ đo giữa các trạm
+            // khác nhau (xem renderHomeChart()).
+            x: {
+                type: "linear",
+                ticks: {
+                    callback: (value) => formatChartLabel(new Date(value), state.activeRange),
+                },
+            },
             y: {
                 title: { display: true, text: "Mức nước dâng (m)" },
             },
         },
+        plugins: {
+            zoom: chartZoomOptions,
+            tooltip: {
+                callbacks: {
+                    title: (items) => (items[0] ? new Date(items[0].parsed.x).toLocaleString("vi-VN") : ""),
+                },
+            },
+        },
     },
 });
+
+homeChartZoomResetBtn.addEventListener("click", () => homeChart.resetZoom());
+homeChartClearHistoryBtn.addEventListener("click", () => clearChartHistory());
 
 homeChartRangeTabs.forEach((btn) => {
     btn.addEventListener("click", () => setActiveRange(btn.dataset.range));
@@ -870,6 +1099,7 @@ function switchView(viewId) {
         renderChartForStation(viewId);
         renderPredictionForStation(viewId);
     }
+    renderHeaderStatus(); // header giờ phản ánh đúng trang/trạm đang xem
 }
 
 // Cho phép bảng trạng thái ở Trang chủ điều hướng sang trang chi tiết trạm
@@ -903,17 +1133,70 @@ function formatChartLabel(date, rangeKey) {
     return `${hh}:${mm}:${ss}`;
 }
 
+function toChartPoints(points, gapMs = MIN_CHART_GAP_MS) {
+    const sorted = [...points].sort((a, b) => a.t.getTime() - b.t.getTime());
+    const chartPoints = [];
+
+    sorted.forEach((point, index) => {
+        if (index > 0) {
+            const previous = sorted[index - 1];
+            const gap = point.t.getTime() - previous.t.getTime();
+            if (gap > gapMs) {
+                chartPoints.push({ x: previous.t.getTime() + gap / 2, y: null });
+            }
+        }
+        chartPoints.push({ x: point.t.getTime(), y: point.rise });
+    });
+
+    return chartPoints;
+}
+
 function renderChartForStation(stationId) {
     if (state.currentViewId !== stationId) return;
     const els = stationEls[stationId];
     const s = state.stations[stationId];
     const rangeMs = RANGE_MS[state.activeRange] ?? RANGE_MS["6h"];
     const now = Date.now();
-    const points = s.history.filter((p) => now - p.t.getTime() <= rangeMs);
+    // "age >= 0" chặn luôn phòng hờ mọi điểm có mốc thời gian ở TƯƠNG LAI
+    // lọt vào s.history (age âm nghĩa là t > now) - dù đã chặn từ gốc lúc
+    // nạp dữ liệu (isPlausibleMeasurementTime), giữ thêm lớp chặn này ở đây
+    // để không phụ thuộc hoàn toàn vào 1 chỗ kiểm tra duy nhất.
+    const points = getChartHistory(stationId, "stations").filter((p) => {
+        const age = now - p.t.getTime();
+        // SỬA LỖI BIỂU ĐỒ TRỄ 1 NHỊP: trước đây là "age >= 0" - đồng hồ ESP32
+        // chỉ cần nhanh hơn đồng hồ máy tính vài giây là điểm đo MỚI NHẤT bị
+        // coi là "tương lai" và bị loại (dù đã có trong lịch sử, mực nước hiện
+        // tại đã hiển thị). Biểu đồ không vẽ lại cho tới lần nhận dữ liệu kế
+        // tiếp -> luôn thiếu đúng điểm mới nhất. Giờ cho phép lệch tới
+        // FUTURE_TOLERANCE_MS, trùng với ngưỡng đã dùng khi nhận dữ liệu
+        // (isPlausibleMeasurementTime) nên điểm nào đã vào lịch sử đều được vẽ.
+        return age >= -FUTURE_TOLERANCE_MS && age <= rangeMs;
+    });
 
     const chart = stationCharts[stationId];
-    chart.data.labels = points.map((p) => formatChartLabel(p.t, state.activeRange));
-    chart.data.datasets[0].data = points.map((p) => p.rise);
+    // Dùng {x, y} với x = mốc thời gian thực (mili-giây) thay vì mảng
+    // labels dạng chuỗi - xem giải thích ở phần khởi tạo trục X phía trên.
+    //
+    // QUAN TRỌNG (đã sửa lỗi mới phát sinh "F5 làm biểu đồ hiện sai/mốc
+    // thời gian tự đổi dù không có dữ liệu mới"): Ở LẦN SỬA TRƯỚC, code có
+    // ép cứng chart.options.scales.x.min/max = [now - rangeMs, now] ở ĐÂY
+    // - tức là MỖI LẦN gọi hàm này (kể cả khi trạm KHÔNG có dữ liệu nào cả,
+    // hoặc dữ liệu thật chỉ nằm gọn trong vài phút), trục X vẫn luôn bị kéo
+    // dài ra đúng bằng "now" (thời điểm gọi hàm - tức thời điểm F5) tới
+    // "now - rangeMs". Hậu quả kép:
+    //   1. Với trạm KHÔNG có dữ liệu (points rỗng), trục X vẫn hiện đủ nhãn
+    //      giờ chạy tới đúng "bây giờ" - tạo cảm giác sai là "có mốc thời
+    //      gian mới" dù không hề có điểm đo nào.
+    //   2. Với trạm CÓ dữ liệu nhưng khoảng thời gian đo thực tế hẹp hơn
+    //      nhiều so với rangeMs (ví dụ tab "6 giờ" nhưng dữ liệu chỉ trải
+    //      dài 20 phút), toàn bộ dữ liệu thật bị dồn ép vào một góc nhỏ của
+    //      biểu đồ, phần còn lại là khoảng trắng vô nghĩa - nhìn khác hẳn
+    //      (và "sai" hơn) so với trước khi sửa.
+    // Sửa: bỏ hẳn việc ép min/max theo "now" - để Chart.js TỰ co giãn trục X
+    // theo đúng khoảng thời gian của DỮ LIỆU THẬT đang có (points đã được
+    // lọc theo đúng tab 6 giờ/12 giờ/24 giờ/7 ngày ở dòng filter phía trên
+    // rồi, không cần ép lại phạm vi trục một lần nữa).
+    chart.data.datasets[0].data = toChartPoints(points, chartGapMsFor(s.measureIntervalMin));
     chart.update();
 
     els.chartEmptyNote.textContent = isStationConnected(stationId)
@@ -926,27 +1209,36 @@ function renderHomeChart() {
     const rangeMs = RANGE_MS[state.activeRange] ?? RANGE_MS["6h"];
     const now = Date.now();
 
-    // Gộp toàn bộ mốc thời gian của 3 trạm lại thành 1 trục nhãn chung
-    // (mỗi trạm có thể có mật độ đo khác nhau), rồi map mỗi trạm vào
-    // đúng vị trí thời gian của nó - KHÔNG trộn dữ liệu giữa các trạm.
-    const allTimestamps = new Set();
-    STATION_IDS.forEach((stationId) => {
-        state.stations[stationId].history
-            .filter((p) => now - p.t.getTime() <= rangeMs)
-            .forEach((p) => allTimestamps.add(p.t.getTime()));
-    });
-    const sortedTimes = Array.from(allTimestamps).sort((a, b) => a - b);
-
+    // ĐÃ SỬA: trước đây gộp mốc thời gian của cả 3 trạm thành 1 mảng
+    // "labels" dùng chung (category scale), rồi map giá trị mỗi trạm vào
+    // đúng CHỈ SỐ của mốc đó - vì category scale chia đều khoảng cách
+    // theo chỉ số (không theo thời gian thực), trạm nào có mật độ đo khác
+    // trạm còn lại sẽ bị hiển thị lệch vị trí thời gian thực (đúng lỗi đã
+    // gặp: trạm 2/3 hiện bên phải trạm 1 dù dữ liệu thực tế lại có mốc
+    // thời gian sớm hơn hoặc xen kẽ).
+    // Giờ mỗi trạm tự có mảng {x, y} riêng với x = mốc thời gian thực -
+    // Chart.js tự đặt đúng vị trí theo trục X số (linear) dùng chung cho
+    // cả 3 trạm, không cần gộp/tra cứu qua danh sách nhãn chung nữa.
     let hasAnyPoint = false;
-    homeChart.data.labels = sortedTimes.map((t) => formatChartLabel(new Date(t), state.activeRange));
     STATION_IDS.forEach((stationId, idx) => {
         const s = state.stations[stationId];
-        const pointsByTime = new Map(
-            s.history.filter((p) => now - p.t.getTime() <= rangeMs).map((p) => [p.t.getTime(), p.rise])
-        );
-        if (pointsByTime.size > 0) hasAnyPoint = true;
-        homeChart.data.datasets[idx].data = sortedTimes.map((t) => (pointsByTime.has(t) ? pointsByTime.get(t) : null));
+        // "age >= 0" chặn phòng hờ điểm có mốc thời gian ở tương lai - xem
+        // giải thích đầy đủ ở renderChartForStation()/isPlausibleMeasurementTime().
+        const points = getChartHistory(stationId, "home")
+            .filter((p) => {
+                const age = now - p.t.getTime();
+                return age >= -FUTURE_TOLERANCE_MS && age <= rangeMs; // xem giải thích ở renderChartForStation()
+            });
+        if (points.length > 0) hasAnyPoint = true;
+        homeChart.data.datasets[idx].data = toChartPoints(points, chartGapMsFor(s.measureIntervalMin));
     });
+    // Đã bỏ việc ép cứng scales.x.min/max = [now - rangeMs, now] - cùng lý
+    // do đã giải thích chi tiết trong renderChartForStation() ở trên: ép
+    // trục X luôn kéo dài tới đúng thời điểm gọi hàm (mỗi lần F5) khiến
+    // biểu đồ hiện mốc thời gian "ảo" ngay cả khi không có trạm nào có dữ
+    // liệu, và dồn ép dữ liệu thật vào một góc nhỏ khi khoảng đo hẹp hơn
+    // rangeMs. Để Chart.js tự co giãn trục X theo đúng khoảng thời gian của
+    // dữ liệu thật (đã lọc theo đúng tab ở trên).
     homeChart.update();
 
     homeChartEmptyNote.hidden = hasAnyPoint;
@@ -1010,6 +1302,21 @@ function renderPredictionForStation(stationId) {
 // ------------------------------------------------------------
 // HIỂN THỊ MỘT TRẠM (dùng chung cho cả 3 trạm, kể cả chưa kết nối)
 // ------------------------------------------------------------
+// Đồng bộ ô nhập "Chu kỳ đo (phút)" với state + khoá/mở theo trạng thái kết
+// nối. Chỉ cho chỉnh khi trạm đã có ESP32 thật (tránh tạo node Configuration
+// cho trạm chưa có phần cứng). Không ghi đè khi người dùng đang gõ dở.
+function renderMeasureIntervalControls(stationId) {
+    const els = stationEls[stationId];
+    const s = state.stations[stationId];
+    const connected = isStationConnected(stationId);
+
+    if (document.activeElement !== els.measureIntervalInput) {
+        els.measureIntervalInput.value = String(s.measureIntervalMin);
+    }
+    els.measureIntervalInput.disabled = !connected;
+    els.measureIntervalSetBtn.disabled = !connected;
+}
+
 function renderStation(stationId) {
     const els = stationEls[stationId];
     const s = state.stations[stationId];
@@ -1017,7 +1324,8 @@ function renderStation(stationId) {
     const connected = isStationConnected(stationId);
 
     if (!connected) {
-        // Trạm chưa có ESP32 thật -> hiển thị "chưa kết nối", vô hiệu hoá input.
+        // Trạm chưa có ESP32 thật -> hiển thị "chưa kết nối" nhưng vẫn cho phép
+        // xem lịch sử và chỉnh các thiết lập chỉ dùng trên web.
         els.waterLevel.textContent = "--";
         els.waterLevelUnit.style.display = "none";
         els.waterLevelDelta.hidden = true;
@@ -1028,21 +1336,26 @@ function renderStation(stationId) {
         els.systemStatus.textContent = SEVERITY_LABEL.unknown;
         els.statusDescription.textContent = SEVERITY_DESC.notConnected;
 
-        els.initialLevelInput.value = "";
-        els.initialLevelInput.placeholder = "--";
-        els.initialLevelInput.disabled = true;
-        els.initialLevelSetBtn.disabled = true;
+        if (document.activeElement !== els.initialLevelInput) {
+            els.initialLevelInput.value = s.initialLevel.toFixed(2);
+        }
+        els.initialLevelInput.placeholder = "";
+        els.initialLevelInput.disabled = false;
+        els.initialLevelSetBtn.disabled = false;
 
         [1, 2, 3].forEach((n) => {
             const input = els[`alertLevel${n}Input`];
-            input.value = "";
-            input.placeholder = "--";
-            input.disabled = true;
-            els[`alertLevel${n}SetBtn`].disabled = true;
+            if (document.activeElement !== input) {
+                input.value = s.alertLevels[`level${n}`].toFixed(2);
+            }
+            input.placeholder = "";
+            input.disabled = false;
+            els[`alertLevel${n}SetBtn`].disabled = false;
         });
 
         els.predictionRange.disabled = true;
-        els.chartRangeTabs.querySelectorAll(".range-tab").forEach((b) => (b.disabled = true));
+        renderMeasureIntervalControls(stationId);
+        els.chartRangeTabs.querySelectorAll(".range-tab").forEach((b) => (b.disabled = false));
 
         els.connectionStatus.textContent = "Chưa kết nối";
         els.connectionStatus.classList.add("is-offline");
@@ -1103,6 +1416,7 @@ function renderStation(stationId) {
     });
 
     els.predictionRange.disabled = false;
+    renderMeasureIntervalControls(stationId);
     els.chartRangeTabs.querySelectorAll(".range-tab").forEach((b) => (b.disabled = false));
 
     // --- Tóm tắt trạm (mục C) ---
@@ -1121,13 +1435,39 @@ function renderStation(stationId) {
 // nối nào bị mất dữ liệu (cũ).
 // ------------------------------------------------------------
 function renderHeaderStatus() {
-    const anyStale = STATION_IDS.some((id) => isStationConnected(id) && !isStationFresh(state.stations[id]));
-    const healthy = state.firebaseConnected && !anyStale;
+    // SỬA LỖI "Trạm 1 đang online nhưng header báo Mất kết nối": TRƯỚC ĐÂY
+    // header luôn gộp CẢ 3 trạm - chỉ cần 1 trạm khác (vd. Trạm 2/3 còn dữ
+    // liệu test cũ trên Firebase) bị cũ là header báo "Mất kết nối / dữ liệu
+    // cũ" ngay cả khi đang xem Trạm 1 hoạt động bình thường, mâu thuẫn với
+    // dòng "Trạng thái kết nối: Đang online" ngay bên dưới.
+    // Giờ: đang xem 1 trạm -> header phản ánh ĐÚNG trạm đó; ở Trang chủ ->
+    // gộp các trạm và nêu rõ TÊN trạm đang mất kết nối.
+    let healthy;
+    let text;
+    if (!state.firebaseConnected) {
+        healthy = false;
+        text = "Mất kết nối tới máy chủ Firebase";
+    } else if (state.currentViewId !== "home") {
+        const id = state.currentViewId;
+        if (!isStationConnected(id)) {
+            healthy = true;
+            text = "Hệ thống hoạt động tốt";
+        } else {
+            healthy = isStationFresh(state.stations[id]);
+            text = healthy ? "Thiết bị đang hoạt động" : `${STATION_META[id].name} mất kết nối / dữ liệu cũ`;
+        }
+    } else {
+        const staleNames = STATION_IDS.filter((id) => isStationConnected(id) && !isStationFresh(state.stations[id])).map(
+            (id) => STATION_META[id].name
+        );
+        healthy = staleNames.length === 0;
+        text = healthy ? "Hệ thống hoạt động tốt" : `Mất kết nối: ${staleNames.join(", ")}`;
+    }
     const systemHealthDot = document.getElementById("systemHealthDot");
     const systemHealthText = document.getElementById("systemHealthText");
     systemHealthDot.classList.toggle("is-online", healthy);
     systemHealthDot.classList.toggle("is-danger", !healthy);
-    systemHealthText.textContent = healthy ? "Hệ thống hoạt động tốt" : "Mất kết nối / dữ liệu cũ";
+    systemHealthText.textContent = text;
 
     // Cập nhật "Cập nhật lần cuối" ở header theo trạm đang xem (nếu là
     // trang chủ, lấy thời điểm mới nhất trong số các trạm đã kết nối).
@@ -1135,8 +1475,9 @@ function renderHeaderStatus() {
         let latest = null;
         STATION_IDS.forEach((id) => {
             const s = state.stations[id];
-            if (isStationConnected(id) && s.lastReceivedAt && (!latest || s.lastReceivedAt > latest.receivedAt)) {
-                latest = { receivedAt: s.lastReceivedAt, raw: s.lastUpdateRaw };
+            const age = stationDataAgeMs(s);
+            if (isStationConnected(id) && Number.isFinite(age) && (!latest || age < latest.age)) {
+                latest = { age, raw: s.lastUpdateRaw };
             }
         });
         document.getElementById("lastUpdate").textContent = latest ? formatVNDateTime(latest.raw) : "--:--:-- --/--/----";
@@ -1144,6 +1485,12 @@ function renderHeaderStatus() {
 }
 
 function renderHomeIfActive() {
+    // Hàm này được gọi ở MỌI chỗ dữ liệu trạm thay đổi (nhận điểm đo mới,
+    // nạp lịch sử, đổi mực tham chiếu/ngưỡng...), BẤT KỂ đang xem trang
+    // nào - nên đây là chỗ phù hợp để kiểm tra và GHI NHỚ kết quả tốc độ
+    // truyền lũ mới (xem updateFlowResults), không phụ thuộc việc người
+    // dùng có đang mở Trang chủ đúng lúc kết quả xuất hiện hay không.
+    updateFlowResults();
     if (state.currentViewId === "home") renderHome();
 }
 
@@ -1314,51 +1661,65 @@ function renderRecentAlerts() {
 // ------------------------------------------------------------
 // ƯỚC TÍNH TỐC ĐỘ TRUYỀN LŨ GIỮA CÁC TRẠM
 // ------------------------------------------------------------
-// CƠ CHẾ MỚI (tự động, không cần người dùng nhập mức nước dâng cụ thể):
-// với mỗi trạm, quét lịch sử "rise" theo thời gian tăng dần và tìm ĐIỂM
-// BẮT ĐẦU của đợt dâng gần nhất - tức là điểm mà độ dốc rise (m/phút)
-// bắt đầu vượt RISE_START_MIN_SLOPE_PER_MIN và duy trì liên tục qua ít
-// nhất RISE_START_MIN_CONSECUTIVE_POINTS điểm đo kế tiếp. Đây thay thế
-// hoàn toàn cách làm cũ (tìm thời điểm rise vượt một ngưỡng mét cố định
-// do người dùng nhập).
-//
-// afterTime (tuỳ chọn): nếu có, chỉ xét các điểm bắt đầu dâng xảy ra SAU
-// thời điểm này - dùng khi khớp sự kiện của trạm đích với sự kiện đã
-// tìm được ở trạm nguồn (lấy đợt dâng gần nhất xảy ra sau đó).
-function detectRiseStartEvent(stationId, afterTime) {
-    const s = state.stations[stationId];
-    if (!isStationConnected(stationId)) return null;
-    const sorted = [...s.history].sort((a, b) => a.t.getTime() - b.t.getTime());
-    const minSpan = RISE_START_MIN_CONSECUTIVE_POINTS - 1;
+// GHI CHÚ (đã đổi lại hoàn toàn - không còn Min/Max/ngưỡng nào cả):
+// Các bản trước có dùng ngưỡng cố định do người dùng chọn, rồi sau đó
+// đổi sang "mức dâng CAO NHẤT của trạm nguồn" - nhưng cách dùng "cao
+// nhất" có vấn đề thực tế: sau khi qua đỉnh lũ và nước RÚT xuống, giá
+// trị cao nhất đó không đổi nữa (vì là max), nên hệ thống bị "kẹt" ở
+// đỉnh cũ, không phát hiện được các đợt lũ lên-xuống tiếp theo. Cách
+// làm ĐÚNG theo yêu cầu hiện tại, không dùng Min/Max/ngưỡng gì cả:
+//   1. Lấy giá trị dâng (rise) tại ĐIỂM ĐO MỚI NHẤT của trạm nguồn (from)
+//      - đây là "mức thay đổi" hiện đang được theo dõi, luôn cập nhật
+//      theo thời gian thực (kể cả khi nước đang rút, rise giảm dần thì
+//      mức đang theo dõi cũng giảm theo, không bị kẹt ở đỉnh cũ).
+//   2. Thời điểm trạm nguồn "có mức thay đổi đó" = thời điểm đo mới nhất
+//      (chính là điểm vừa lấy ở bước 1).
+//   3. Tìm trong lịch sử trạm ĐÍCH (to) điểm đo ĐẦU TIÊN SAU thời điểm đó
+//      có giá trị rise gần bằng (trong sai số cho phép RISE_MATCH_TOLERANCE_M)
+//      giá trị đã ghi nhận ở trạm nguồn - không cần trùng tuyệt đối vì
+//      cảm biến đo số thực liên tục, gần như không bao giờ trùng khớp
+//      100%.
+//   4. Ngay khi tìm được điểm khớp ở trạm đích, tính tốc độ = khoảng
+//      cách / thời gian chênh lệch giữa 2 thời điểm - không cần chờ gì
+//      thêm, không kiểm tra rise phải lớn hơn 1 mức tối thiểu nào.
+const RISE_MATCH_TOLERANCE_M = 0.03; // 3cm - sai số cho phép để coi 2 giá trị dâng là "khớp nhau"
 
+// ĐIỀU KIỆN TÍNH LẠI TỐC ĐỘ TRUYỀN LŨ (chỉ kiểm soát THỜI ĐIỂM tính lại,
+// KHÔNG thay đổi công thức/cách tính):
+//   - Sau mỗi lần tính được kết quả, ghi nhớ mực nước (khoảng cách đo) của
+//     TRẠM NGUỒN tại thời điểm tính -> refDistance.
+//   - Chỉ cho phép tính kết quả MỚI khi mực nước hiện tại của trạm nguồn
+//     chênh lệch >= 10 cm so với refDistance.
+//   - Chênh lệch < 10 cm -> KHÔNG tính lại, GIỮ NGUYÊN tốc độ đã tính (không
+//     xoá, không đặt về 0).
+//   - Mỗi lần tính hợp lệ -> cập nhật refDistance = mực nước lúc tính.
+// So sánh trên khoảng cách đo thô (không phải mức dâng) để việc đổi "mực
+// nước tham chiếu" không làm mốc so sánh bị dịch theo. Vì mức dâng = mực
+// tham chiếu - khoảng cách, 10 cm khoảng cách = 10 cm mức dâng.
+const FLOW_RECALC_MIN_CHANGE_M = 0.10;
+
+// Chênh lệch tính theo mm (làm tròn) để tránh sai số dấu phẩy động, ví dụ
+// |0.60 - 0.50| = 0.09999999999999998 bị hiểu nhầm là < 10 cm.
+function levelChangeMm(currentDistance, refDistance) {
+    return Math.round(Math.abs(currentDistance - refDistance) * 1000);
+}
+
+function isFlowRecalcAllowed(prev, currentDistance) {
+    if (!prev || !Number.isFinite(prev.refDistance)) return true; // chưa có mốc (lần tính đầu) -> cho tính
+    if (!Number.isFinite(currentDistance)) return false;          // chưa biết mực nước hiện tại -> giữ kết quả cũ
+    return levelChangeMm(currentDistance, prev.refDistance) >= Math.round(FLOW_RECALC_MIN_CHANGE_M * 1000);
+}
+
+// Tìm điểm đo ĐẦU TIÊN trong history có thời điểm SAU afterTime và có
+// rise nằm trong khoảng [targetRise - tolerance, targetRise + tolerance].
+function findMatchingRiseAfter(history, targetRise, afterTime, tolerance) {
+    const sorted = [...history].sort((a, b) => a.t.getTime() - b.t.getTime());
     for (let i = 0; i < sorted.length; i += 1) {
-        if (afterTime && sorted[i].t.getTime() <= afterTime.getTime()) continue;
-
-        // Cần đủ điểm phía sau i để kiểm tra chuỗi dâng liên tục.
-        if (i + minSpan >= sorted.length) break;
-
-        let isRisingRun = true;
-        for (let k = i; k < i + minSpan; k += 1) {
-            const a = sorted[k];
-            const b = sorted[k + 1];
-            const minutes = (b.t.getTime() - a.t.getTime()) / 60000;
-            if (minutes <= 0) {
-                isRisingRun = false;
-                break;
-            }
-            const slope = (b.rise - a.rise) / minutes;
-            if (slope < RISE_START_MIN_SLOPE_PER_MIN) {
-                isRisingRun = false;
-                break;
-            }
-        }
-
-        if (isRisingRun) {
-            // Điểm i là điểm cuối cùng TRƯỚC KHI đợt dâng bắt đầu tăng rõ
-            // rệt (hoặc chính là điểm khởi đầu nếu i === 0) -> coi đây là
-            // thời điểm bắt đầu đợt dâng.
-            return sorted[i].t;
-        }
+        const p = sorted[i];
+        if (p.t.getTime() <= afterTime.getTime()) continue; // phải xảy ra SAU trạm nguồn
+        // So theo mm (làm tròn) để lệch ĐÚNG 3 cm vẫn được tính là khớp (tránh sai số
+        // dấu phẩy động, ví dụ |0.33 - 0.30| = 0.030000000000000027 > 0.03).
+        if (Math.round(Math.abs(p.rise - targetRise) * 1000) <= Math.round(tolerance * 1000)) return p.t;
     }
     return null;
 }
@@ -1378,6 +1739,94 @@ function getPairDistanceKm(pairKey) {
     return state.distances["1-2"] + state.distances["2-3"];
 }
 
+// ------------------------------------------------------------
+// TÍNH "ĐIỂM KHỚP HIỆN TẠI" CHO 1 CẶP TRẠM (logic tính GIỮ NGUYÊN như cũ):
+//   - Trạm nguồn: lấy điểm đo MỚI NHẤT -> fromTime (t_A), targetRise (h*)
+//   - Trạm đích: điểm đầu tiên SAU t_A có |rise - h*| <= RISE_MATCH_TOLERANCE_M -> toTime (t_B)
+// ------------------------------------------------------------
+function computeCurrentFlowMatch(pairKey) {
+    const pair = FLOW_PAIRS[pairKey];
+    const fromState = state.stations[pair.from];
+    const toState = state.stations[pair.to];
+    const fromConnected = isStationConnected(pair.from);
+    const toConnected = isStationConnected(pair.to);
+
+    const fromSorted = fromConnected ? [...fromState.history].sort((a, b) => a.t.getTime() - b.t.getTime()) : [];
+    const fromLatest = fromSorted.length ? fromSorted[fromSorted.length - 1] : null;
+    const fromTime = fromLatest ? fromLatest.t : null;
+    const targetRise = fromLatest ? fromLatest.rise : null;
+    const fromDistance = fromLatest ? fromLatest.distance : null; // mực nước (khoảng cách đo) hiện tại của trạm nguồn
+
+    const toTime =
+        toConnected && targetRise != null
+            ? findMatchingRiseAfter(toState.history, targetRise, fromTime, RISE_MATCH_TOLERANCE_M)
+            : null;
+
+    return { fromConnected, toConnected, fromTime, toTime, targetRise, fromDistance };
+}
+
+// ------------------------------------------------------------
+// GHI NHỚ KẾT QUẢ TỐC ĐỘ TRUYỀN LŨ (SỬA LỖI "kết quả bị mất mỗi khi trạm
+// nguồn gửi điểm đo mới"):
+// Trước đây kết quả chỉ được TÍNH LẠI rồi vẽ ra mỗi lần render, không được
+// lưu ở đâu cả. Vì t_A luôn là điểm MỚI NHẤT của trạm nguồn, ngay khi trạm
+// nguồn gửi thêm 1 điểm (kể cả giá trị không đổi), điểm khớp cũ ở trạm đích
+// nằm TRƯỚC t_A mới nên bị loại -> kết quả biến mất, quay về "Đang chờ".
+// Giờ: mỗi khi tìm được một cặp (t_A, t_B) hợp lệ KHÁC với kết quả đang
+// lưu, ghi nó vào state.flowResults[pairKey] + Firebase. Kết quả này được
+// HIỂN THỊ LIÊN TỤC cho tới khi có kết quả mới thay thế.
+// Hàm được gọi từ renderHomeIfActive() - tức ở MỌI lần dữ liệu thay đổi,
+// bất kể đang xem trang nào.
+// ------------------------------------------------------------
+function updateFlowResults() {
+    Object.keys(FLOW_PAIRS).forEach((pairKey) => {
+        const m = computeCurrentFlowMatch(pairKey);
+        if (!m.fromTime || !m.toTime) return; // chưa có kết quả mới -> GIỮ NGUYÊN kết quả cũ
+        const fromMs = m.fromTime.getTime();
+        const toMs = m.toTime.getTime();
+        if (toMs <= fromMs) return;
+
+        const prev = state.flowResults[pairKey];
+        if (prev && prev.fromTime === fromMs && prev.toTime === toMs) return; // đúng kết quả đang lưu -> không ghi lại
+
+        // Điều kiện 10 cm: chưa đủ -> KHÔNG tính kết quả mới, giữ nguyên kết quả cũ
+        if (!isFlowRecalcAllowed(prev, m.fromDistance)) return;
+
+        const result = {
+            fromTime: fromMs,
+            toTime: toMs,
+            targetRise: Number(m.targetRise.toFixed(3)),
+            // Mốc so sánh cho lần tính tiếp theo = mực nước trạm nguồn tại lần tính này
+            refDistance: Number(m.fromDistance.toFixed(3)),
+            computedAt: Date.now(),
+        };
+        state.flowResults[pairKey] = result;
+        set(ref(database, `WebSettings/FlowSpeedResults/${pairKey}`), result)
+            .then(() => console.log(`[Tốc độ truyền lũ ${pairKey}] Đã lưu kết quả mới:`, result))
+            .catch((error) => console.error(`Lỗi khi lưu kết quả tốc độ truyền lũ (${pairKey}):`, error));
+    });
+}
+
+function parseStoredFlowResult(raw) {
+    if (!raw) return null;
+    const fromTime = Number(raw.fromTime);
+    const toTime = Number(raw.toTime);
+    const targetRise = Number(raw.targetRise);
+    if (!Number.isFinite(fromTime) || !Number.isFinite(toTime) || !Number.isFinite(targetRise) || toTime <= fromTime) {
+        return null;
+    }
+    const refDistance = Number(raw.refDistance);
+    return {
+        fromTime,
+        toTime,
+        targetRise,
+        // Kết quả lưu từ bản cũ chưa có refDistance -> null: lần khớp kế tiếp được
+        // tính bình thường, từ đó trở đi mới áp dụng điều kiện 10 cm.
+        refDistance: Number.isFinite(refDistance) ? refDistance : null,
+        computedAt: Number(raw.computedAt) || null,
+    };
+}
+
 function renderFlowSpeedPanel() {
     const pairKey = state.activeFlowPair;
     const pair = FLOW_PAIRS[pairKey];
@@ -1385,37 +1834,52 @@ function renderFlowSpeedPanel() {
 
     const fromMeta = STATION_META[pair.from];
     const toMeta = STATION_META[pair.to];
-    const fromState = state.stations[pair.from];
-    const toState = state.stations[pair.to];
-
-    // Tự động phát hiện: thời điểm trạm nguồn bắt đầu một đợt dâng, rồi
-    // tìm đợt dâng gần nhất của trạm đích xảy ra SAU thời điểm đó (được
-    // xem là cùng một đợt lũ truyền tới) - không còn phụ thuộc vào một
-    // mức nước dâng cố định do người dùng nhập.
-    const fromTime = detectRiseStartEvent(pair.from);
-    const toTime = fromTime ? detectRiseStartEvent(pair.to, fromTime) : detectRiseStartEvent(pair.to);
 
     const resultEl = document.getElementById("flowResult");
 
-    const fromConnected = isStationConnected(pair.from);
-    const toConnected = isStationConnected(pair.to);
+    // Phần 1: trạng thái THEO DÕI HIỆN TẠI (như cũ - có thể đang "Đang chờ")
+    const { fromConnected, toConnected, fromTime, toTime, targetRise, fromDistance } = computeCurrentFlowMatch(pairKey);
 
-    const fromTimeText = fromTime ? formatClockDateTime(fromTime) : "Chưa phát hiện đợt dâng";
-    const toTimeText = toTime ? formatClockDateTime(toTime) : "Chưa phát hiện đợt dâng";
+    const fromTimeText = fromTime ? formatClockDateTime(fromTime) : "Chưa có dữ liệu";
+    const toTimeText = toTime ? formatClockDateTime(toTime) : "Chưa đạt mức tương ứng";
 
-    let metricsHtml = "";
     let noteHtml = "";
-
     if (!fromConnected || !toConnected) {
         noteHtml = `<p class="flow-result-note">Cần cả hai trạm (${fromMeta.name}, ${toMeta.name}) có dữ liệu thật để ước tính tốc độ truyền lũ. Trạm chưa kết nối sẽ không có dữ liệu để phân tích.</p>`;
-    } else if (!fromTime || !toTime) {
-        noteHtml = `<p class="flow-result-note">Chưa đủ dữ liệu: hệ thống cần phát hiện được đợt dâng ở ${fromMeta.name} và một đợt dâng tương ứng xảy ra sau đó ở ${toMeta.name} thì mới tự động tính được thời gian truyền lũ.</p>`;
-    } else if (toTime.getTime() < fromTime.getTime()) {
-        noteHtml = `<p class="flow-result-note">${toMeta.name} bắt đầu dâng trước ${fromMeta.name} — không phù hợp với chiều truyền lũ ${fromMeta.name} → ${toMeta.name} đang chọn. Vui lòng kiểm tra lại dữ liệu.</p>`;
-    } else {
-        const timeDiffMs = toTime.getTime() - fromTime.getTime();
+    } else if (!fromTime) {
+        noteHtml = `<p class="flow-result-note">${fromMeta.name} chưa có dữ liệu mực nước nào - chưa có gì để theo dõi tốc độ truyền lũ.</p>`;
+    } else if (!toTime) {
+        noteHtml = `<p class="flow-result-note">${fromMeta.name} đang ở mức nước dâng <strong>${targetRise >= 0 ? "+" : ""}${targetRise.toFixed(
+            2
+        )} m</strong> so với mực nước tham chiếu riêng (ghi nhận lúc ${fromTimeText}), đang chờ ${toMeta.name} đạt mức tương ứng (sai số cho phép ±${(
+            RISE_MATCH_TOLERANCE_M * 100
+        ).toFixed(0)} cm) so với mốc tham chiếu riêng của ${toMeta.name} để xác định thời gian truyền lũ.</p>`;
+    }
+
+    // Phần 2: KẾT QUẢ GẦN NHẤT ĐÃ LƯU - luôn hiển thị nếu đã từng có, kể cả
+    // khi phần theo dõi hiện tại đang "Đang chờ". Tốc độ tính lại theo
+    // khoảng cách HIỆN TẠI (nếu người dùng vừa sửa khoảng cách).
+    let metricsHtml = "";
+    const saved = state.flowResults[pairKey];
+    if (saved) {
+        const timeDiffMs = saved.toTime - saved.fromTime;
         const timeDiffHours = timeDiffMs / 3600000;
         const speedKmh = timeDiffHours > 0 ? distanceKm / timeDiffHours : null;
+        const savedRiseText = `${saved.targetRise >= 0 ? "+" : ""}${saved.targetRise.toFixed(2)} m`;
+
+        // Trạng thái điều kiện 10 cm (chỉ để người xem biết vì sao tốc độ chưa đổi)
+        let recalcNoteHtml = "";
+        if (Number.isFinite(saved.refDistance) && Number.isFinite(fromDistance)) {
+            const changeMm = levelChangeMm(fromDistance, saved.refDistance);
+            const enough = changeMm >= Math.round(FLOW_RECALC_MIN_CHANGE_M * 1000);
+            recalcNoteHtml = `<p class="flow-result-note">Mực nước ${fromMeta.name} đã thay đổi <strong>${(changeMm / 10).toFixed(
+                1
+            )} cm</strong> so với mốc ${saved.refDistance.toFixed(2)} m của lần tính gần nhất - ${
+                enough
+                    ? `đủ ${(FLOW_RECALC_MIN_CHANGE_M * 100).toFixed(0)} cm, tốc độ sẽ được tính lại khi ${toMeta.name} đạt mức tương ứng.`
+                    : `chưa đủ ${(FLOW_RECALC_MIN_CHANGE_M * 100).toFixed(0)} cm nên giữ nguyên tốc độ đã tính.`
+            }</p>`;
+        }
 
         metricsHtml = `
             <div class="flow-result-metrics">
@@ -1432,15 +1896,24 @@ function renderFlowSpeedPanel() {
                     <p class="flow-result-metric-value">${distanceKm.toFixed(1)} km</p>
                 </div>
             </div>
+            <p class="flow-result-note">
+                Kết quả gần nhất: ${fromMeta.name} ở mức dâng <strong>${savedRiseText}</strong> lúc ${formatClockDateTime(new Date(saved.fromTime))}
+                → ${toMeta.name} đạt mức tương ứng lúc ${formatClockDateTime(new Date(saved.toTime))}.
+                Kết quả được giữ nguyên cho đến khi có kết quả mới.
+            </p>
+            ${recalcNoteHtml}
         `;
+    } else if (fromConnected && toConnected && fromTime) {
+        metricsHtml = `<p class="flow-result-note">Chưa có kết quả tốc độ truyền lũ nào được ghi nhận cho cặp trạm này.</p>`;
     }
 
+    const targetRiseText = targetRise != null ? `${targetRise >= 0 ? "+" : ""}${targetRise.toFixed(2)} m` : "--";
     const fromBadge = fromTime
-        ? `<span class="flow-result-badge is-done">✔ Đã phát hiện đợt dâng</span>`
-        : `<span class="flow-result-badge">⏳ Đang theo dõi</span>`;
+        ? `<span class="flow-result-badge is-done">✔ Mức hiện tại ${targetRiseText}</span>`
+        : `<span class="flow-result-badge">⏳ Chưa có dữ liệu</span>`;
     const toBadge = toTime
-        ? `<span class="flow-result-badge is-done">✔ Đã phát hiện đợt dâng</span>`
-        : `<span class="flow-result-badge">⏳ Đang theo dõi</span>`;
+        ? `<span class="flow-result-badge is-done">✔ Đạt mức tương ứng ${targetRiseText}</span>`
+        : `<span class="flow-result-badge">⏳ Đang chờ</span>`;
 
     resultEl.innerHTML = `
         <div class="flow-result-route">
@@ -1464,8 +1937,8 @@ function renderFlowSpeedPanel() {
             ${fromBadge}
             ${toBadge}
         </div>
-        ${metricsHtml}
         ${noteHtml}
+        ${metricsHtml}
     `;
 }
 
@@ -1489,12 +1962,38 @@ const distanceInput23 = document.getElementById("distanceInput-2-3");
 const saveDistancesBtn = document.getElementById("saveDistancesBtn");
 const flowPairTabs = document.querySelectorAll(".flow-pair-tab");
 
+// GHI CHÚ: đã bỏ hẳn ô nhập "Mức nước dâng để phân tích" (riseThresholdInput)
+// và listener của nó - không còn ngưỡng cố định do người dùng chọn nữa,
+// xem renderFlowSpeedPanel()/findMatchingRiseAfter() ở trên.
+
+// Đồng bộ 2 ô input khoảng cách với state.distances - dùng chung cho MỌI
+// nơi state.distances thay đổi (mở form, tải trang xong, hoặc nhận dữ
+// liệu mới từ Firebase qua onValue/get), không chỉ lúc bấm nút mở form.
+//
+// QUAN TRỌNG (đã sửa lỗi "Lưu khoảng cách xong, F5 lại thấy về mặc định
+// 5.0/7.0" - lần debug trước đã XÁC NHẬN state.distances/Firebase vẫn lưu
+// ĐÚNG giá trị mới sau F5, chỉ riêng 2 ô input này không tự cập nhật):
+// TRƯỚC ĐÂY, distanceInput12/distanceInput23 CHỈ được gán giá trị bên
+// trong listener "click" của editDistancesBtn (tức là CHỈ khi người dùng
+// bấm mở form). Trong HTML, 2 ô input này có sẵn value="5.0"/"7.0" hard-
+// code. Nếu form đang ở trạng thái "đang mở" ngay sau khi tải trang
+// (hidden=false do trình duyệt/Live Server giữ lại DOM state, hoặc do
+// người dùng để mở từ trước khi F5), 2 ô input vẫn hiển thị nguyên giá
+// trị HTML gốc 5.0/7.0 - KHÔNG liên quan gì đến việc lưu có thành công
+// hay không, chỉ là chưa có gì gọi hàm gán lại value cho chúng lúc trang
+// vừa tải xong. Sửa: gọi hàm này ngay sau khi state.distances được xác
+// định (thành công) trong onValue(distancesRef)/get(distancesRef), để 2
+// ô input luôn khớp với dữ liệu thật, bất kể form đang mở hay đóng.
+function syncDistanceInputs() {
+    distanceInput12.value = state.distances["1-2"].toFixed(1);
+    distanceInput23.value = state.distances["2-3"].toFixed(1);
+}
+
 editDistancesBtn.addEventListener("click", () => {
     const isHidden = distanceEditor.hidden;
     distanceEditor.hidden = !isHidden;
     if (isHidden) {
-        distanceInput12.value = state.distances["1-2"].toFixed(1);
-        distanceInput23.value = state.distances["2-3"].toFixed(1);
+        syncDistanceInputs();
     }
 });
 
@@ -1550,9 +2049,40 @@ function syncHardwareWarningLevel(stationId, floodRef, initialLevel, level3) {
         );
         distanceThreshold = MIN_HARDWARE_THRESHOLD;
     }
-    update(floodRef, { WarningLevel: distanceThreshold })
-        .then(() => console.log(`[${stationId}] Đã đồng bộ ngưỡng phần cứng FloodSystem/WarningLevel:`, distanceThreshold))
-        .catch((error) => console.error(`[${stationId}] Lỗi khi đồng bộ ngưỡng phần cứng:`, error));
+    // QUAN TRỌNG (đã sửa lỗi "xoá FloodSystem xong, thao tác gì đó lại bị
+    // tạo lại"): TRƯỚC ĐÂY hàm này gọi thẳng update(floodRef, {WarningLevel:
+    // ...}) - vì update() sẽ TỰ TẠO node Stations/<id>/FloodSystem nếu nó
+    // chưa tồn tại. Hàm này chỉ được gọi khi isStationConnected(stationId)
+    // là true ở 2 nơi gọi nó (SET "Mực nước tham chiếu" / "Cảnh báo mức 3"),
+    // nhưng isStationConnected() đọc từ s.hasReceivedData - một cờ CỐ Ý
+    // không bao giờ tự reset về false trong cùng 1 phiên trình duyệt (xem
+    // comment ở onValue(flood, ...) - để không đột ngột khoá lại input nếu
+    // trạm chỉ mất dữ liệu tạm thời). Hậu quả: nếu bạn xoá FloodSystem của
+    // 1 trạm rồi bấm SET ở đúng panel trạm đó (mà KHÔNG tải lại trang giữa
+    // 2 thao tác), cờ trong bộ nhớ vẫn coi là "đã kết nối" từ lần dữ liệu
+    // gần nhất, hàm này vẫn chạy và TỰ TẠO LẠI node FloodSystem (chỉ với
+    // field WarningLevel) - đúng như "tự động được tạo lại" mà không có
+    // ESP32 nào ghi gì cả.
+    // Sửa: không tin cờ trong bộ nhớ, luôn hỏi lại Firebase XEM NODE NÀY
+    // THỰC SỰ ĐANG CÓ DỮ LIỆU THẬT (WaterLevel) HAY KHÔNG ngay trước khi
+    // ghi - nếu node đã bị xoá/chưa từng tồn tại, bỏ qua, không ghi gì.
+    get(floodRef)
+        .then((snapshot) => {
+            const current = snapshot.val();
+            if (!current || !Number.isFinite(Number(current.WaterLevel))) {
+                console.warn(
+                    `[${stationId}] Bỏ qua đồng bộ ngưỡng phần cứng: trạm này chưa có dữ liệu FloodSystem ` +
+                        `thật (chưa có ESP32 gửi WaterLevel) - không tự tạo lại node.`
+                );
+                return;
+            }
+            update(floodRef, { WarningLevel: distanceThreshold })
+                .then(() =>
+                    console.log(`[${stationId}] Đã đồng bộ ngưỡng phần cứng FloodSystem/WarningLevel:`, distanceThreshold)
+                )
+                .catch((error) => console.error(`[${stationId}] Lỗi khi đồng bộ ngưỡng phần cứng:`, error));
+        })
+        .catch((error) => console.error(`[${stationId}] Lỗi khi kiểm tra FloodSystem trước khi đồng bộ ngưỡng:`, error));
     const { configuration } = stationRefs(stationId);
     saveConfiguration(configuration, distanceThreshold);
 }
@@ -1607,14 +2137,62 @@ onValue(connectedRef, (snapshot) => {
     renderHeaderStatus();
 });
 
+onValue(serverTimeOffsetRef, (snapshot) => {
+    const offset = Number(snapshot.val());
+    serverTimeOffsetMs = Number.isFinite(offset) ? offset : 0;
+    renderHeaderStatus();
+});
+
 onValue(distancesRef, (snapshot) => {
     const data = snapshot.val();
     if (!data) {
+        // QUAN TRỌNG (đã sửa lỗi "Lưu khoảng cách xong, F5 lại trang thì
+        // mất, quay về mặc định 5.0/7.0"): TRƯỚC ĐÂY, cứ mỗi khi callback
+        // này nhận snapshot rỗng (data=null) VÀ state.distancesInitialized
+        // (biến JS, luôn bị reset về false mỗi khi tải lại trang) còn là
+        // false, code lập tức GHI ĐÈ (set) WebSettings/StationDistances về
+        // giá trị mặc định. Nhưng "data=null" ở lần callback ĐẦU TIÊN sau
+        // khi F5 không có nghĩa là node chưa từng tồn tại - có thể chỉ là
+        // độ trễ mạng bình thường trước khi Firebase kịp trả dữ liệu thật
+        // về. Vì state.distancesInitialized luôn là false ngay sau F5, hệ
+        // thống hiểu nhầm là "chưa từng lưu" và ghi đè mất giá trị người
+        // dùng vừa lưu trước đó - đúng nguyên nhân của lỗi "lưu được nhưng
+        // F5 lại mất".
+        //
+        // Sửa: giống hệt cách đã sửa cho WebSettings/<stationId> - gọi
+        // get() một lần để XÁC NHẬN CHẮC CHẮN node thực sự trống trước khi
+        // ghi đè mặc định, thay vì tin ngay giá trị null đầu tiên nhận
+        // được từ onValue.
         if (!state.distancesInitialized) {
-            state.distancesInitialized = true;
-            set(distancesRef, { ...DEFAULT_DISTANCES }).catch((error) =>
-                console.error("Lỗi khi khởi tạo khoảng cách mặc định giữa các trạm:", error)
-            );
+            get(distancesRef).then((freshSnapshot) => {
+                if (state.distancesInitialized) return; // đã có lần khác (onValue thật) lo việc này rồi
+                const freshData = freshSnapshot.val();
+                if (freshData) {
+                    // Node thực ra đã có dữ liệu (null trước đó chỉ là
+                    // tạm thời/timing) - KHÔNG ghi đè, mà phải tự cập nhật
+                    // state + render ngay tại đây, vì onValue sẽ KHÔNG bắn
+                    // lại lần nữa nếu không có thay đổi nào khác xảy ra
+                    // sau đó (nếu bỏ qua như trước, state.distances mãi
+                    // giữ giá trị mặc định trong bộ nhớ dù Firebase đã có
+                    // đúng giá trị người dùng lưu - đây là lý do bản vá
+                    // trước vẫn bị "lưu được nhưng F5 vẫn hiện mặc định").
+                    state.distancesInitialized = true;
+                    const d12 = Number(freshData["1-2"]);
+                    const d23 = Number(freshData["2-3"]);
+                    state.distances = {
+                        "1-2": Number.isFinite(d12) ? d12 : DEFAULT_DISTANCES["1-2"],
+                        "2-3": Number.isFinite(d23) ? d23 : DEFAULT_DISTANCES["2-3"],
+                    };
+                    syncDistanceInputs();
+                    renderHomeIfActive();
+                    return;
+                }
+                // Xác nhận chắc chắn node thực sự trống -> mới khởi tạo mặc định.
+                state.distancesInitialized = true;
+                set(distancesRef, { ...DEFAULT_DISTANCES }).catch((error) =>
+                    console.error("Lỗi khi khởi tạo khoảng cách mặc định giữa các trạm:", error)
+                );
+            });
         }
         return;
     }
@@ -1625,23 +2203,66 @@ onValue(distancesRef, (snapshot) => {
         "1-2": Number.isFinite(d12) ? d12 : DEFAULT_DISTANCES["1-2"],
         "2-3": Number.isFinite(d23) ? d23 : DEFAULT_DISTANCES["2-3"],
     };
+    syncDistanceInputs();
     renderHomeIfActive();
 });
 
-STATION_IDS.forEach((stationId) => {
-    if (!isStationConnected(stationId)) {
-        // Trạm chưa có phần cứng thật: không lắng nghe Firebase, chỉ
-        // render trạng thái "chưa kết nối" tĩnh khi cần.
-        return;
-    }
+// Đồng bộ "kết quả tốc độ truyền lũ gần nhất" từ Firebase - để kết quả
+// vẫn còn sau khi F5 / mở trên máy khác.
+onValue(flowResultsRef, (snapshot) => {
+    const data = snapshot.val() || {};
+    Object.keys(FLOW_PAIRS).forEach((pairKey) => {
+        const stored = parseStoredFlowResult(data[pairKey]);
+        if (stored) state.flowResults[pairKey] = stored;
+    });
+    if (state.currentViewId === "home") renderFlowSpeedPanel();
+});
 
-    const { flood, measurement, configuration, webSettings } = stationRefs(stationId);
+STATION_IDS.forEach((stationId) => {
+    // QUAN TRỌNG (đã sửa): TRƯỚC ĐÂY có điều kiện "if (!isStationConnected)
+    // return" ở đây khiến Trạm 2/3 KHÔNG BAO GIỜ được đăng ký lắng nghe
+    // Firebase (vì lúc đó isStationConnected() luôn đọc từ hasHardware
+    // hard-code = false) - dù ESP32 thật đã nạp code và gửi dữ liệu lên
+    // đúng nhánh, web vẫn không hề gọi onValue nên không thể nhận được.
+    // Giờ TẤT CẢ các trạm trong STATION_IDS đều được đăng ký lắng nghe như
+    // nhau; trạng thái "đã kết nối" tự cập nhật ngay khi có dữ liệu thật
+    // (xem s.hasReceivedData bên dưới), không cần biết trước trạm nào có
+    // phần cứng.
+    const { flood, measurement, configuration, webSettings, measureInterval } = stationRefs(stationId);
+
+    // Đồng bộ chu kỳ đo (phút) từ Firebase về giao diện. Node chưa tồn tại
+    // (null) => dùng mặc định, KHÔNG tự ghi gì lên Firebase (tránh tạo node
+    // Configuration cho trạm chưa có phần cứng).
+    onValue(measureInterval, (snapshot) => {
+        const s = state.stations[stationId];
+        const val = Number(snapshot.val());
+        const newMin =
+            Number.isFinite(val) && val >= MIN_MEASURE_INTERVAL_MIN && val <= MAX_MEASURE_INTERVAL_MIN
+                ? Math.round(val)
+                : DEFAULT_MEASURE_INTERVAL_MIN;
+        // Chu kỳ bị ĐỔI trong lúc trang đang mở (không tính lần tải đầu):
+        // giữ ngưỡng "mất kết nối" theo chu kỳ cũ thêm 1 chu kỳ cũ + 60s để
+        // ESP32 kịp nhận giá trị mới (xem staleMsFor).
+        if (s.measureIntervalLoaded && newMin !== s.measureIntervalMin) {
+            s.prevMeasureIntervalMin = s.measureIntervalMin;
+            s.intervalGraceUntil = Date.now() + s.measureIntervalMin * 60 * 1000 + 60 * 1000;
+        }
+        s.measureIntervalLoaded = true;
+        s.measureIntervalMin = newMin;
+        renderMeasureIntervalControls(stationId);
+        if (state.currentViewId === stationId) renderChartForStation(stationId);
+        renderHomeIfActive();
+    });
 
     onValue(flood, (snapshot) => {
         const data = snapshot.val();
         const s = state.stations[stationId];
 
         if (!data) {
+            // Chưa từng có dữ liệu (hoặc node đã bị xoá) - giữ nguyên trạng
+            // thái "chưa kết nối" nếu chưa từng nhận được gì; nếu trạm đã
+            // từng kết nối rồi mất node thì vẫn coi là đã kết nối (để không
+            // đột ngột khoá lại input), chỉ mất "tươi" (fresh) theo staleMsFor().
             s.distance = null;
             s.outOfRange = false;
             s.lastUpdateRaw = null;
@@ -1651,32 +2272,97 @@ STATION_IDS.forEach((stationId) => {
             return;
         }
 
+        // Lần đầu tiên trạm này có dữ liệu thật từ Firebase -> đánh dấu đã
+        // kết nối. Vì trạng thái connected/chưa-connected quyết định CẢ
+        // NHÁNH RENDER khác nhau (mở khoá input, hiển thị biểu đồ...), cần
+        // render lại toàn bộ (không chỉ phần dữ liệu) ngay khi cờ này vừa
+        // bật lên true.
+        const justConnected = !s.hasReceivedData;
+        s.hasReceivedData = true;
+
+        // ---- XÁC ĐỊNH "THIẾT BỊ VỪA GỬI MỚI" (sửa lỗi Online/Offline sai) ----
+        // TRƯỚC ĐÂY: mọi lần onValue(flood) chạy đều đặt lastReceivedAt =
+        // Date.now(), kể cả khi (a) vừa mở trang và Firebase trả về dữ liệu CŨ
+        // (thiết bị đã chết vẫn hiện "online"), hoặc (b) chính Web vừa ghi
+        // FloodSystem/WarningLevel (không phải thiết bị gửi). Ngược lại, nếu
+        // thiết bị gửi payload giống hệt lần trước (LastUpdate="N/A" + mực
+        // nước không đổi) thì Firebase KHÔNG phát sự kiện -> Web tưởng mất kết nối.
+        // SỬA: firmware mới gửi kèm UpdatedAt (giờ máy chủ) + Seq (luôn tăng);
+        // tuổi dữ liệu tính theo UpdatedAt (xem stationDataAgeMs). Chỉ coi là
+        // "lần gửi mới" khi dấu Seq/LastUpdate/UpdatedAt thay đổi.
+        const updatedAt = Number(data.UpdatedAt);
+        s.deviceUpdatedAt = Number.isFinite(updatedAt) ? updatedAt : null;
+        const stamp = `${data.Seq ?? ""}|${data.LastUpdate ?? ""}|${data.UpdatedAt ?? ""}`;
+        const isNewDevicePublish = stamp !== s.deviceStamp;
+        s.deviceStamp = stamp;
+        if (isNewDevicePublish && !justConnected) {
+            // Chỉ dùng cho firmware cũ (không có UpdatedAt). Lần đầu mở trang
+            // KHÔNG đặt - không biết dữ liệu đó cũ bao lâu rồi.
+            s.lastReceivedAt = Date.now();
+        }
+
         const distance = Number(data.WaterLevel);
         const outOfRange = isOutOfRange(distance);
-        const changed = s.distance === null || distance !== s.distance || outOfRange !== s.outOfRange;
+        // "changed" chỉ dùng để quyết định có cần RENDER lại giao diện hay
+        // không (mở khoá input, cập nhật số hiển thị...). KHÔNG được dùng
+        // để quyết định "có phải điểm đo mới hay không" - vì justConnected
+        // luôn = true ở lần onValue() đầu tiên MỖI KHI TẢI LẠI TRANG (F5),
+        // kể cả khi Firebase không hề có bản ghi nào mới so với lần trước.
+        const changed = justConnected || s.distance === null || distance !== s.distance || outOfRange !== s.outOfRange;
 
         s.distance = distance;
         s.outOfRange = outOfRange;
         s.lastUpdateRaw = data.LastUpdate || null;
-        s.lastReceivedAt = Date.now();
 
-        if (changed && !outOfRange) {
-            // Dùng đúng thời điểm ĐO THỰC TẾ (LastUpdate do ESP32 gửi kèm),
-            // không dùng thời điểm trình duyệt NHẬN được dữ liệu qua Firebase
-            // (có thể trễ hơn vài giây do độ trễ mạng). Điều này đặc biệt
-            // quan trọng cho "Ước tính tốc độ truyền lũ": nếu dùng nhầm thời
-            // điểm nhận, chênh lệch thời gian giữa 2 trạm sẽ bị sai lệch và
-            // suy ra tốc độ vô lý. Chỉ fallback về thời điểm nhận khi ESP32
-            // không gửi kèm timestamp hợp lệ.
-            const measuredAt = parseVNDateTimeToDate(s.lastUpdateRaw) || new Date();
-            const newPoint = { t: measuredAt, distance, rise: computeRise(distance, s.initialLevel) };
-            s.history.push(newPoint);
-            s.history.sort((a, b) => a.t.getTime() - b.t.getTime());
-            if (s.history.length > CLIENT_HISTORY_LIMIT) s.history.shift();
+        if (!outOfRange) {
+            // QUAN TRỌNG (đã sửa lỗi "F5 tự thêm mốc thời gian mới trên
+            // biểu đồ" + "F5 tự gửi thêm dữ liệu lên Google Sheets dù không
+            // có gì mới"): TRƯỚC ĐÂY, code dùng "changed" (luôn true ở lần
+            // đầu mỗi khi F5, xem giải thích ở trên) làm điều kiện duy nhất
+            // để coi đây là "điểm đo mới" rồi tự động thêm vào lịch sử biểu
+            // đồ + gửi sang Google Sheets. Hậu quả:
+            //   1. Mỗi lần F5, dù ESP32 không gửi gì thêm, code vẫn coi lần
+            //      đọc FloodSystem đầu tiên là "mới" và thêm 1 điểm vào biểu
+            //      đồ - nếu đúng lúc đó parseVNDateTimeToDate(LastUpdate)
+            //      không đọc được (dữ liệu cũ/định dạng lạ), code còn rơi
+            //      vào nhánh dự phòng "|| new Date()" - LẤY LUÔN THỜI ĐIỂM
+            //      BẤM F5 làm mốc thời gian đo - khiến biểu đồ hiện sai mốc
+            //      (mốc "ảo" là giờ mở trang, không phải giờ đo thật).
+            //   2. Vì mốc thời gian "ảo" đó khác mọi mốc đã có trong Google
+            //      Sheets, cơ chế chống trùng ở Apps Script (so khoá theo
+            //      Trạm + Thời gian đo) KHÔNG nhận ra được, nên vẫn ghi
+            //      thành một dòng MỚI THẬT trên Sheet dù không có phép đo
+            //      nào mới - đúng nguyên nhân lỗi "F5 là Sheet lại có thêm
+            //      dữ liệu".
+            //
+            // Sửa: bỏ hẳn nhánh dự phòng "|| new Date()" (không còn dùng giờ
+            // mở trang làm mốc đo giả), và chỉ coi là điểm đo MỚI THẬT SỰ
+            // khi (a) ESP32 có gửi kèm LastUpdate hợp lệ, VÀ (b) mốc thời
+            // gian đó CHƯA từng có trong lịch sử hiện tại của trạm (so theo
+            // mili-giây) - vì get(measurement) bên dưới có thể đã nạp sẵn
+            // đúng bản ghi này rồi, hoặc chính onValue() này đã từng thêm nó
+            // ở lần chạy trước trong cùng phiên.
+            const measuredAt = parseVNDateTimeToDate(s.lastUpdateRaw);
+            if (measuredAt && !isPlausibleMeasurementTime(measuredAt)) {
+                console.warn(
+                    `[${stationId}] Bỏ qua điểm đo có mốc thời gian ở tương lai so với đồng hồ hiện tại ` +
+                        `(LastUpdate="${s.lastUpdateRaw}") - khả năng cao đồng hồ ESP32 (RTC/NTP) chưa đồng bộ đúng.`
+                );
+            } else if (measuredAt) {
+                const measuredAtMs = measuredAt.getTime();
+                const alreadyRecorded = s.history.some((p) => p.t.getTime() === measuredAtMs);
+                if (!alreadyRecorded) {
+                    const newPoint = { t: measuredAt, distance, rise: computeRise(distance, s.initialLevel) };
+                    s.history.push(newPoint);
+                    s.history.sort((a, b) => a.t.getTime() - b.t.getTime());
+                    if (s.history.length > CLIENT_HISTORY_LIMIT) s.history.shift();
 
-            // Sao lưu điểm đo mới sang Google Sheets (nếu đã cấu hình URL) -
-            // chỉ chạy khi web đang mở, không chặn luồng chính nếu lỗi mạng.
-            sendToGoogleSheetsBackup(stationId, newPoint);
+                    // Sao lưu điểm đo MỚI THẬT SỰ sang Google Sheets (nếu đã
+                    // cấu hình URL) - chỉ chạy khi web đang mở, không chặn
+                    // luồng chính nếu lỗi mạng.
+                    sendToGoogleSheetsBackup(stationId, newPoint);
+                }
+            }
         }
 
         if (changed) cleanupOldMeasurements(stationId, measurement);
@@ -1695,9 +2381,60 @@ STATION_IDS.forEach((stationId) => {
         const s = state.stations[stationId];
 
         if (!data) {
+            // QUAN TRỌNG (đã sửa lỗi "SET xong bị trả về giá trị mặc định"):
+            // TRƯỚC ĐÂY, mỗi khi callback này nhận data=null (kể cả null
+            // "tạm thời" do độ trễ mạng ngay sau khi update() vừa ghi lên
+            // Firebase, hoặc do việc kết nối lại/onValue bắn lại), code sẽ
+            // GHI ĐÈ (set) toàn bộ WebSettings/<stationId> về giá trị mặc
+            // định NẾU s.webSettingsInitialized còn là false. Nhưng
+            // s.webSettingsInitialized là biến JS trong bộ nhớ trình duyệt -
+            // nó bị reset về false mỗi khi tải lại trang, kể cả khi node
+            // Firebase THỰC RA đã có dữ liệu người dùng từng SET trước đó.
+            // Nếu đúng lúc trang vừa tải/kết nối lại, callback đầu tiên vô
+            // tình nhận được snapshot rỗng (do timing), hệ thống sẽ tưởng
+            // "chưa từng khởi tạo" và ghi đè mặc định lên, xoá mất giá trị
+            // người dùng đã lưu - đúng là nguyên nhân khiến SET "không ăn".
+            //
+            // Sửa: chỉ coi là "cần khởi tạo mặc định" khi ĐÃ CHẮC CHẮN node
+            // này chưa từng tồn tại - kiểm tra lại bằng get() một lần thay
+            // vì tin ngay vào giá trị null đầu tiên nhận được từ onValue.
             if (!s.webSettingsInitialized) {
-                s.webSettingsInitialized = true;
-                pushDefaultWebSettings(stationId, webSettings);
+                get(webSettings).then((freshSnapshot) => {
+                    if (s.webSettingsInitialized) return; // đã có lần khác (onValue thật) lo việc này rồi
+                    const freshData = freshSnapshot.val();
+                    if (freshData) {
+                        // Node thực ra đã có dữ liệu (null trước đó chỉ là
+                        // tạm thời/timing) - KHÔNG ghi đè, mà phải tự cập
+                        // nhật state + render ngay tại đây, vì onValue sẽ
+                        // KHÔNG bắn lại lần nữa nếu không có thay đổi nào
+                        // khác xảy ra sau đó (nếu chỉ set cờ rồi bỏ qua,
+                        // state.stations[id].alertLevels/initialLevel mãi
+                        // giữ giá trị mặc định trong bộ nhớ dù Firebase đã
+                        // có đúng giá trị người dùng SET - đây là lý do
+                        // bản vá trước vẫn bị "SET được nhưng F5 lại về
+                        // mặc định").
+                        s.webSettingsInitialized = true;
+                        const initialLevel = Number(freshData.InitialLevel);
+                        s.initialLevel = Number.isFinite(initialLevel) ? initialLevel : DEFAULT_INITIAL_LEVEL;
+                        const lv = freshData.AlertLevels || {};
+                        s.alertLevels = {
+                            level1: Number.isFinite(Number(lv.level1)) ? Number(lv.level1) : DEFAULT_ALERT_LEVELS.level1,
+                            level2: Number.isFinite(Number(lv.level2)) ? Number(lv.level2) : DEFAULT_ALERT_LEVELS.level2,
+                            level3: Number.isFinite(Number(lv.level3)) ? Number(lv.level3) : DEFAULT_ALERT_LEVELS.level3,
+                        };
+                        recomputeHistoryRise(stationId);
+                        if (state.currentViewId === stationId) {
+                            renderStation(stationId);
+                            renderChartForStation(stationId);
+                            renderPredictionForStation(stationId);
+                        }
+                        renderHomeIfActive();
+                        return;
+                    }
+                    // Xác nhận chắc chắn node thực sự trống -> mới khởi tạo mặc định.
+                    s.webSettingsInitialized = true;
+                    pushDefaultWebSettings(stationId, webSettings);
+                });
             }
             return;
         }
@@ -1741,13 +2478,35 @@ STATION_IDS.forEach((stationId) => {
                 })
                 .filter((p) => Number.isFinite(p.distance) && p.distance >= 0); // bỏ qua bản ghi ngoài tầm đo (-1)
 
-            const points = rawPoints.map((p) => ({
-                t: p.parsedT || new Date(),
-                distance: p.distance,
-                rise: computeRise(p.distance, s.initialLevel),
-            }));
+            // Bỏ qua hẳn bản ghi nào không đọc được Timestamp hợp lệ, thay vì
+            // dùng "new Date()" (giờ tải trang) làm mốc thay thế như trước -
+            // cùng nguyên tắc đã áp dụng ở onValue(flood, ...): không bao giờ
+            // tự bịa mốc thời gian, vì mỗi lần F5 hàm get() này đều chạy lại
+            // - nếu vẫn còn fallback "new Date()" thì mỗi lần tải trang có
+            // thể sinh ra một mốc "ảo" khác nhau cho cùng 1 bản ghi lỗi định
+            // dạng, gây đúng lỗi "F5 tự đổi mốc thời gian" ở quy mô nhỏ hơn.
+            // Đồng thời loại bỏ bản ghi có Timestamp hợp lệ về mặt định dạng
+            // nhưng lại rơi vào TƯƠNG LAI so với đồng hồ hiện tại (đồng hồ
+            // ESP32 sai/dữ liệu cũ có ngày tháng sai) - xem giải thích chi
+            // tiết ở isPlausibleMeasurementTime() phía trên: chỉ 1 bản ghi như
+            // vậy cũng đủ kéo giãn sai toàn bộ trục thời gian của biểu đồ.
+            const points = rawPoints
+                .filter((p) => p.parsedT !== null && isPlausibleMeasurementTime(p.parsedT))
+                .map((p) => ({
+                    t: p.parsedT,
+                    distance: p.distance,
+                    rise: computeRise(p.distance, s.initialLevel),
+                }));
 
-            s.history.unshift(...points);
+            // Chỉ thêm những điểm CHƯA có sẵn trong s.history (so theo mốc
+            // thời gian, mili-giây) - tránh bị trùng với điểm mà
+            // onValue(flood, ...) có thể đã thêm trước đó do thứ tự chạy
+            // giữa 2 lệnh gọi Firebase này khi tải trang không cố định (get()
+            // là bất đồng bộ, có thể xong trước hoặc sau onValue() lần đầu).
+            const existingTimes = new Set(s.history.map((p) => p.t.getTime()));
+            const newPoints = points.filter((p) => !existingTimes.has(p.t.getTime()));
+            s.history.unshift(...newPoints);
+            s.history.sort((a, b) => a.t.getTime() - b.t.getTime());
             if (state.currentViewId === stationId) renderChartForStation(stationId);
             renderHomeIfActive();
 
@@ -1757,7 +2516,7 @@ STATION_IDS.forEach((stationId) => {
             // vì gửi sai thời điểm đo sẽ làm sai khoá chống trùng ở Apps
             // Script và làm sai dữ liệu lưu trữ dài hạn).
             const backfillPoints = rawPoints
-                .filter((p) => p.parsedT !== null)
+                .filter((p) => p.parsedT !== null && isPlausibleMeasurementTime(p.parsedT))
                 .map((p) => ({ t: p.parsedT, distance: p.distance, rise: computeRise(p.distance, s.initialLevel) }));
             pendingBackfillByStation[stationId] = backfillPoints;
             if (backupState.webAppUrl) backfillBackupForStation(stationId, backfillPoints);
@@ -1776,7 +2535,7 @@ setInterval(() => {
         renderOverviewCards();
         renderStationStatusTable();
     }
-}, 5000);
+}, 1000);
 
 // ------------------------------------------------------------
 // KHỞI ĐỘNG
