@@ -697,6 +697,15 @@ select {
     margin-top: var(--space-2);
 }
 
+.chart-canvas-wrapper canvas {
+    cursor: grab;
+    touch-action: none;
+}
+
+.chart-canvas-wrapper canvas:active {
+    cursor: grabbing;
+}
+
 #waterChart {
     width: 100% !important;
     max-width: 100%;
@@ -759,6 +768,15 @@ select {
 #alertLevelRow1 { border-left-color: var(--color-warning); }
 #alertLevelRow2 { border-left-color: var(--color-alert-2); }
 #alertLevelRow3 { border-left-color: var(--color-danger); }
+
+/* Khối "Chu kỳ đo" nằm cuối bảng cài đặt, tách khỏi 3 mức cảnh báo phía trên */
+.interval-settings-title {
+    margin-top: var(--space-5);
+}
+
+.interval-row {
+    border-left-color: var(--color-purple);
+}
 
 .alert-level-icon {
     font-size: 18px;
@@ -993,14 +1011,6 @@ select {
     font-size: 13px;
     font-weight: 700;
     color: var(--color-heading);
-}
-
-.flow-speed-auto-note {
-    margin: 0;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--color-text-muted);
-    line-height: 1.5;
 }
 
 .flow-speed-input-group {
