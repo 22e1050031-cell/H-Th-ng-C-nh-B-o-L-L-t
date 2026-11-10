@@ -26,7 +26,7 @@
             </div>
             <div class="header-org-info" id="headerOrgInfo">
                 <h2 id="orgName">ĐẠI HỌC HUẾ</h2>
-                <p id="orgUnit">KHOA KỸ THUẬT VÀ CÔNG NGHỆ</p>
+                <p id="orgUnit">TRƯỜNG KỸ THUẬT VÀ CÔNG NGHỆ</p>
             </div>
         </div>
 
@@ -185,6 +185,10 @@
                             <span class="icon" aria-hidden="true">💾</span> Lưu
                         </button>
                     </div>
+                    <p class="metric-note">
+                        URL này chỉ lưu trong trình duyệt của bạn (localStorage), không gửi lên Firebase.
+                        Xem hướng dẫn tạo URL trong tài liệu đi kèm dự án.
+                    </p>
                     <p class="backup-counter" id="backupCounter">Đã sao lưu: 0 bản ghi trong phiên này.</p>
                 </div>
             </section>
@@ -201,10 +205,10 @@
                     </h3>
 
                     <div class="flow-speed-controls" id="flowSpeedControls">
-                        <p class="flow-speed-auto-note">
-                            Hệ thống tự động theo dõi mực nước từng trạm và tự nhận diện thời điểm bắt đầu một đợt dâng để tính thời gian/tốc độ truyền lũ — không cần nhập mức nước dâng.
-                        </p>
-
+                        <!-- Đã bỏ ô nhập "Mức nước dâng để phân tích" (riseThresholdInput):
+                             không còn ngưỡng cố định do người dùng chọn - hệ thống tự lấy
+                             mức dâng cao nhất trạm nguồn vừa đạt để so sánh, xem script.js
+                             (findSourcePeakRise / renderFlowSpeedPanel). -->
                         <div class="flow-speed-control-item">
                             <span class="flow-speed-control-label">Khoảng cách giữa các trạm (km):</span>
                             <button type="button" id="editDistancesBtn" class="btn btn-set btn-outline">
@@ -248,6 +252,13 @@
                             <span class="icon" aria-hidden="true">📈</span>
                             Biểu đồ xu hướng mức nước dâng các trạm
                         </h3>
+                            <button type="button" class="btn btn-outline" id="homeChartZoomResetBtn" title="Hiển thị toàn bộ biểu đồ">
+                                ↺ Toàn bộ
+                            </button>
+                            <button type="button" class="btn btn-outline" id="homeChartClearHistoryBtn"
+                                    title="Chỉ ẩn lịch sử khỏi biểu đồ tổng quan, không xóa dữ liệu Firebase">
+                                Xóa lịch sử đo
+                            </button>
                         <button type="button" class="btn btn-outline btn-export-csv" id="exportCsvAllBtn">
                             <span class="icon" aria-hidden="true">⬇️</span> Xuất CSV (tất cả trạm)
                         </button>
@@ -442,6 +453,13 @@
                                 <span class="icon" aria-hidden="true">📈</span>
                                 Biểu đồ mức nước dâng (<span class="station-label" data-field="stationLabel">Trạm</span>)
                             </h3>
+                            <button type="button" class="btn btn-outline" data-field="zoomResetBtn" title="Hiển thị toàn bộ biểu đồ">
+                                ↺ Toàn bộ
+                            </button>
+                            <button type="button" class="btn btn-outline" data-field="clearHistoryBtn"
+                                    title="Chỉ ẩn lịch sử khỏi biểu đồ của trạm này, không xóa dữ liệu Firebase">
+                                Xóa lịch sử đo
+                            </button>
                             <button type="button" class="btn btn-outline btn-export-csv" data-field="exportCsvBtn">
                                 <span class="icon" aria-hidden="true">⬇️</span> Xuất CSV
                             </button>
@@ -493,6 +511,30 @@
                             <span class="alert-level-unit">m</span>
                             <button type="button" class="btn btn-set" data-field="alertLevel3SetBtn">SET</button>
                         </div>
+
+                        <!-- G. CHU KỲ ĐO (phút) - điều chỉnh trực tiếp trên Web.
+                             Giá trị được ghi lên Firebase: Stations/<id>/Configuration/MeasureIntervalMin,
+                             ESP32 đọc và áp dụng cho các chu kỳ đo kế tiếp (không cần nạp lại code).
+                             Chu kỳ đo = khoảng thời gian giữa 2 KẾT QUẢ ĐO CHÍNH THỨC; mỗi kết quả
+                             là trung bình của 10 lần đo nội bộ trên ESP32. -->
+                        <h3 class="alert-settings-title interval-settings-title">
+                            <span class="icon" aria-hidden="true">⏱️</span>
+                            CHU KỲ ĐO
+                        </h3>
+
+                        <div class="alert-level-row interval-row" data-field="measureIntervalRow">
+                            <span class="alert-level-icon icon" aria-hidden="true">⏱️</span>
+                            <span class="alert-level-label">Đo mỗi</span>
+                            <input type="number" class="alert-level-input" data-field="measureIntervalInput"
+                                   value="5" step="1" min="1" max="1440" inputmode="numeric"
+                                   aria-label="Chu kỳ đo (phút)">
+                            <span class="alert-level-unit">phút</span>
+                            <button type="button" class="btn btn-set" data-field="measureIntervalSetBtn">SET</button>
+                        </div>
+                        <p class="metric-note">
+                            Từ 1 đến 1440 phút (mặc định 5). Mỗi chu kỳ ESP32 đo 10 lần, lấy trung bình rồi gửi 1 kết quả.
+                            Thay đổi có hiệu lực sau tối đa ~30 giây, không cần nạp lại code.
+                        </p>
                     </section>
 
                 </div><!-- /.lower-panels -->
@@ -508,6 +550,8 @@
 </div><!-- /#dashboardApp -->
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
 <script type="module" src="script.js"></script>
 </body>
 </html>
